@@ -55,7 +55,7 @@ function App() {
         setIsLoadingInitialPosts(true);
         try {
           console.log("App: Fetching user info...");
-          const response = await axios.get('http://localhost:4000/api/me', {
+          const response = await axios.get('http://192.168.1.164:4000/api/me', {
             headers: { 'Authorization': `Bearer ${token}` }
           });
           setUsername(response.data?.name || '');

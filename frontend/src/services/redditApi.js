@@ -1,8 +1,19 @@
 import axios from 'axios';
-
+import { useConfig } from '../ConfigContext';
 // Reddit API credentials
-const CLIENT_ID = 'dBRtI56wSSKD9QZpWXEtbQ';
-const REDIRECT_URI = 'http://localhost:3000/auth-callback';
+
+const { config, loading, error } = useConfig();
+
+if (loading) {
+  return <div>Loading configuration...</div>;
+}
+
+if (error) {
+  return <div>Error loading configuration: {error.message}</div>;
+}
+const CLIENT_ID = config.redditClientId;
+const REDIRECT_URI = config.redditCallback;
+
 const RANDOM_STRING = 'random_string'; // Should be generated per session
 const SCOPES = ['history', 'identity'];
 const LIMIT = 100;
@@ -61,15 +72,15 @@ export const getSavedPosts = async (token, username, limit = LIMIT) => {
         limit: limit
       }
     });
-    
+
     // Extract posts from response and filter for media content
     const savedItems = response.data.data.children.map(child => child.data);
-    
+
     // Filter for posts with media
     return savedItems.filter(post => {
       // Check if it's a submission (not a comment)
       if (!post.title) return false;
-      
+
       // Check for various media types
       return (
         post.is_video ||
@@ -92,23 +103,23 @@ export const getMediaUrl = (post) => {
   if (post.url.match(/\.(jpg|jpeg|png|gif)$/i)) {
     return post.url;
   }
-  
+
   // Handle Reddit videos
   if (post.is_video && post.media && post.media.reddit_video) {
     return post.media.reddit_video.fallback_url;
   }
-  
+
   // Handle imgur links without extension
   if (post.url.includes('imgur.com') && !post.url.match(/\.(jpg|jpeg|png|gif)$/i)) {
     return `${post.url}.jpg`;
   }
-  
+
   // Handle gfycat links
   if (post.url.includes('gfycat.com')) {
     const gfycatId = post.url.split('/').pop();
     return `https://thumbs.gfycat.com/${gfycatId}-size_restricted.gif`;
   }
-  
+
   // Default case
   return post.thumbnail !== 'default' ? post.thumbnail : null;
 };

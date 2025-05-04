@@ -4,8 +4,8 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const app = express();
-const PORT = 4000;
-
+const PORT = process.env.PORT;
+const LIMIT = 20;
 // --- Middleware ---
 app.use(cors());
 app.use(express.json());
@@ -158,7 +158,7 @@ app.get('/api/saved/:username', async (req, res) => {
         'User-Agent': 'web:reddit-saved-gallery:v1.0 (by /u/YourUsername)'
       },
       params: {
-        limit: 50,
+        limit: LIMIT,
         after: after || null
       }
     });

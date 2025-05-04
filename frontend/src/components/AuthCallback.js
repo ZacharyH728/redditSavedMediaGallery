@@ -2,27 +2,38 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import LoadingSpinner from './LoadingSpinner'; // Ensure this component exists
-
-// Reddit API credentials from environment variables
-const CLIENT_ID = process.env.REACT_APP_REDDIT_CLIENT_ID;
-// Client Secret is NOT used/needed in the frontend for 'web' or 'installed' app types
-// The backend proxy handles the secret securely if required (e.g., for 'script' type, though not typical for this flow)
-const CLIENT_SECRET = ''; // Leave empty
+import { useConfig } from '../ConfigContext.js';
 
 // Other constants
-const REDIRECT_URI = 'http://localhost:3000/auth-callback'; // Must match Reddit app settings
+const CLIENT_SECRET = ''; // Leave empty
 
 function AuthCallback({ setToken }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [error, setError] = useState(null);
+  const { config, loading, errorConfig } = useConfig();
+  
   const [debug, setDebug] = useState({
     stage: 'starting',
     url: location.search,
-    clientIDAvailable: !!CLIENT_ID // Check if CLIENT_ID was loaded
+    clientIDAvailable: false // Will be updated once config loads
   });
 
   useEffect(() => {
+    // Don't proceed if config is still loading or has errors
+    if (loading || errorConfig) {
+      return;
+    }
+
+    // Get CLIENT_ID from config
+    const CLIENT_ID = config.redditClientId;
+    const REDIRECT_URI = config.redditCallback;
+    // Update debug with CLIENT_ID status
+    setDebug(prev => ({
+      ...prev,
+      clientIDAvailable: !!CLIENT_ID
+    }));
+
     // Ensure Client ID is available
     if (!CLIENT_ID) {
       setError("Configuration Error: Missing Reddit Client ID.");
@@ -77,13 +88,12 @@ function AuthCallback({ setToken }) {
         console.log("Sending code to proxy server...");
 
         // Use the Docker service name 'backend' and port 4000
-        const response = await axios.post('http://localhost:4000/api/token', {
+        const response = await axios.post('http://192.168.1.164:4000/api/token', {
           code,
           redirect_uri: REDIRECT_URI, // Ensure REDIRECT_URI is defined correctly
           client_id: CLIENT_ID,
           client_secret: CLIENT_SECRET
         });
-
 
         console.log("Proxy server response status:", response.status);
         console.log("Token data received:", response.data); // Log received data for debugging
@@ -164,9 +174,28 @@ function AuthCallback({ setToken }) {
     };
 
     processCallback();
-  }, [location, navigate, setToken]); // Dependencies for the effect
+  }, [location, navigate, setToken, config, loading, errorConfig]); // Added config dependencies
 
-  // Render loading or error state
+  // Rendering logic
+  if (loading) {
+    return (
+      <div className="auth-callback-container">
+        <h2>Loading configuration...</h2>
+        <LoadingSpinner />
+      </div>
+    );
+  }
+
+  if (errorConfig) {
+    return (
+      <div className="auth-error-container">
+        <h2>Configuration Error</h2>
+        <div className="error-message">Error loading configuration: {errorConfig.message}</div>
+        <button onClick={() => navigate('/')}>Return to Login</button>
+      </div>
+    );
+  }
+
   if (error) {
     return (
       <div className="auth-error-container">

@@ -54,7 +54,7 @@ function MediaGallery({
 
     try {
       const savedResponse = await axios.get(
-        `http://localhost:4000/api/saved/${username}`,
+        `http://192.168.1.164:4000/api/saved/${username}`,
         {
           headers: { 'Authorization': `Bearer ${token}` },
           params: { after: after } // Send the current 'after' value
@@ -118,7 +118,7 @@ function MediaGallery({
 
       try {
         const savedResponse = await axios.get(
-          `http://localhost:4000/api/saved/${username}`,
+          `http://192.168.1.164:4000/api/saved/${username}`,
           {
             headers: { 'Authorization': `Bearer ${token}` },
             params: { after: null } // Explicitly fetch first page

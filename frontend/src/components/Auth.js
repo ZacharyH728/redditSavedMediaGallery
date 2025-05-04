@@ -1,21 +1,33 @@
 import React from 'react';
 import { v4 as uuidv4 } from 'uuid'; // Ensure you have 'uuid' installed: npm install uuid
-
+import { useConfig } from '../ConfigContext';
 // Reddit API credentials from environment variables
 // Note: Create React App automatically includes variables prefixed with REACT_APP_
-const CLIENT_ID = process.env.REACT_APP_REDDIT_CLIENT_ID;
-
-// Ensure required environment variables are set
-if (!CLIENT_ID) {
-  console.error("Error: REACT_APP_REDDIT_CLIENT_ID environment variable not set.");
-  // Optionally, render an error message or prevent component rendering
-}
 
 // Other constants
-const REDIRECT_URI = 'http://localhost:3000/auth-callback'; // Must match Reddit app settings
 const SCOPES = ['history', 'identity', 'save']; // Include 'save' if needed for future features
 
 function Auth() {
+  const { config, loading, error } = useConfig();
+
+  if (loading) {
+    return <div>Loading configuration...</div>;
+  }
+
+  if (error) {
+    return <div>Error loading configuration: {error.message}</div>;
+  }
+
+  // Now safely use the configuration
+  const CLIENT_ID = config.redditClientId;
+  const REDIRECT_URI = config.redditCallback;
+
+  // Ensure required environment variables are set
+  if (!CLIENT_ID) {
+    console.error("Error: REDDIT_CLIENT_ID environment variable not set.");
+    // Optionally, render an error message or prevent component rendering
+  }
+
   const handleLogin = () => {
     // Check if Client ID is available before proceeding
     if (!CLIENT_ID) {

@@ -1,15 +1,13 @@
 # docker-compose.yml
-
-version: '3.8'
-
 services:
   frontend:
+    image: zacharyh728/reddit-saved-gallery-frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile
       # Pass build-time args for React App env vars
       args:
-        REACT_APP_REDDIT_CLIENT_ID: ${REACT_APP_REDDIT_CLIENT_ID} # Read from .env file
+        REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID} # Read from .env file
     ports:
       - "3000:3000"
     depends_on:
@@ -24,6 +22,7 @@ services:
     #   - .env
 
   backend:
+    image: zacharyh728/reddit-saved-gallery-backend
     build:
       context: ./backend
       dockerfile: Dockerfile

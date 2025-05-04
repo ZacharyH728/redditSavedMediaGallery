@@ -5,8 +5,6 @@ FROM node:18-alpine AS build
 
 WORKDIR /usr/src/app/frontend
 
-ARG REACT_APP_REDDIT_CLIENT_ID
-
 # Copy package.json and package-lock.json
 COPY package*.json ./
 
@@ -15,8 +13,6 @@ RUN npm install
 
 # Copy the rest of the application code
 COPY . .
-
-ENV REACT_APP_REDDIT_CLIENT_ID=$REACT_APP_REDDIT_CLIENT_ID
 
 # Build the React app for production
 RUN npm run build
@@ -32,9 +28,12 @@ RUN npm install -g serve
 # Copy the build output from the build stage
 COPY --from=build /usr/src/app/frontend/build ./build
 
+COPY generateConfig.js .
 
 # Expose port 3000
 EXPOSE 3000
 
 # Start the server
-CMD ["serve", "-s", "build", "-l", "3000"]
+# ENTRYPOINT ["sh", "-c"]
+# CMD ["node generateConfig.js && serve -s build -l 3000"]
+CMD node generateConfig.js && serve -s build -l 3000
