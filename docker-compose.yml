@@ -1,0 +1,47 @@
+# docker-compose.yml
+
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # Pass build-time args for React App env vars
+      args:
+        REACT_APP_REDDIT_CLIENT_ID: ${REACT_APP_REDDIT_CLIENT_ID} # Read from .env file
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      # Pass runtime variables if needed (less common for CRA builds)
+      NODE_ENV: production
+      # REACT_APP_REDDIT_CLIENT_ID: ${REACT_APP_REDDIT_CLIENT_ID} # Also needed at runtime if not baked into build
+    networks:
+      - reddit-gallery-net
+    # env_file: # Alternative: Specify .env file directly (less common for frontend)
+    #   - .env
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000" # Uncomment for debugging backend
+    environment:
+      # Pass backend-specific variables from the .env file
+      # These will be available as process.env.VARIABLE_NAME in server.js
+      NODE_ENV: production
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+    # Or use env_file to load all variables from the .env file
+    # env_file:
+    #   - .env
+    networks:
+      - reddit-gallery-net
+
+networks:
+  reddit-gallery-net:
+    driver: bridge
+
