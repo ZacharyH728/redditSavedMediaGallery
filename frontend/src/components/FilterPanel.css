@@ -1,0 +1,89 @@
+.filter-panel {
+  position: relative;
+}
+
+.filter-toggle {
+  background-color: var(--card-background);
+  border: 1px solid var(--border-color);
+  color: var(--gray-color);
+  padding: 10px 20px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.filter-toggle:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.filter-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 10px;
+  background-color: var(--card-background);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 300px;
+  max-height: 500px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+}
+
+.filter-section {
+  margin-bottom: 20px;
+}
+
+.filter-section h4 {
+  margin: 0 0 10px 0;
+  color: var(--primary-color);
+  font-size: 14px;
+  text-transform: uppercase;
+}
+
+.filter-section label {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.filter-section input[type="checkbox"] {
+  margin-right: 8px;
+}
+
+.filter-section select {
+  width: 100%;
+  padding: 8px;
+  background-color: var(--background-color);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--gray-color);
+}
+
+.subreddit-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.clear-filters {
+  width: 100%;
+  padding: 10px;
+  background-color: transparent;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: all 0.2s;
+}
+
+.clear-filters:hover {
+  background-color: var(--primary-color);
+  color: white;
+}

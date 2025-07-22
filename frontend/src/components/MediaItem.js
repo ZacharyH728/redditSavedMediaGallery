@@ -1,36 +1,30 @@
 import React, { useState } from 'react';
 import './MediaItem.css';
 
-function MediaItem({ post }) {
+function MediaItem({ post, viewMode, isSelected, onSelect, onDownload }) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
-  const [showInfo, setShowInfo] = useState(true);
+  const [showInfo, setShowInfo] = useState(viewMode === 'feed');
+  const [imageError, setImageError] = useState(false);
   
-  // Get media URL based on post type
   const getMediaUrl = (post) => {
-    // Handle direct image links
     if (post.url.match(/\.(jpg|jpeg|png|gif)$/i)) {
       return { type: 'image', url: post.url };
     }
     
-    // Handle Reddit videos
     if (post.is_video && post.media && post.media.reddit_video) {
       return { type: 'video', url: post.media.reddit_video.fallback_url };
     }
     
-    // Handle redgifs - various patterns
     if (post.url.includes('redgifs.com') || 
         post.domain === 'redgifs.com' || 
         (post.preview && post.preview.reddit_video_preview)) {
       
-      // Extract redgif ID
       let redgifId = null;
       
-      // Pattern: redgifs.com/watch/[id]
       if (post.url.includes('/watch/')) {
         redgifId = post.url.split('/watch/')[1]?.split(/[?#]/)[0];
       } 
-      // Pattern: redgifs.com/[id]
       else if (post.url.match(/redgifs\.com\/\w+/)) {
         redgifId = post.url.split('redgifs.com/')[1]?.split(/[?#]/)[0];
       }
@@ -43,28 +37,22 @@ function MediaItem({ post }) {
         };
       }
       
-      // Fallback: return the URL for direct opening
       return { type: 'link', provider: 'redgif', url: post.url };
     }
     
-    // Handle imgur links without extension
     if (post.url.includes('imgur.com') && !post.url.match(/\.(jpg|jpeg|png|gif)$/i)) {
       return { type: 'image', url: `${post.url}.jpg` };
     }
     
-    // Handle gfycat links
     if (post.url.includes('gfycat.com')) {
       const gfycatId = post.url.split('/').pop().split('-')[0];
-      // First try the mp4 version
       return { type: 'video', url: `https://giant.gfycat.com/${gfycatId}.mp4` };
     }
     
-    // If we can detect it's an image post
     if (post.post_hint === 'image' || post.url.includes('i.redd.it')) {
       return { type: 'image', url: post.url };
     }
     
-    // Default case - check if preview available
     if (post.preview && post.preview.images && post.preview.images[0]) {
       const preview = post.preview.images[0];
       if (preview.source) {
@@ -72,29 +60,58 @@ function MediaItem({ post }) {
       }
     }
     
-    // Last resort - use thumbnail
     if (post.thumbnail && post.thumbnail !== 'default' && post.thumbnail !== 'self') {
       return { type: 'image', url: post.thumbnail };
     }
     
-    // Nothing worked, return link
     return { type: 'link', url: post.url };
   };
   
-  // Process the media information
   const mediaInfo = getMediaUrl(post);
   
   const handleLoad = () => setLoaded(true);
-  const handleError = () => setError(true);
+  const handleError = () => {
+    setError(true);
+    setImageError(true);
+  };
   
-  // Toggle info panel when clicking on media
   const toggleInfo = () => {
-    setShowInfo(!showInfo);
+    if (viewMode === 'grid') {
+      setShowInfo(!showInfo);
+    }
   };
 
-  // Render different content based on media type
+  // Progressive image loading
+  const ProgressiveImage = ({ src, alt }) => {
+    const [currentSrc, setCurrentSrc] = useState(post.thumbnail || '');
+    const [isLoading, setIsLoading] = useState(true);
+    
+    React.useEffect(() => {
+      const img = new Image();
+      img.src = src;
+      img.onload = () => {
+        setCurrentSrc(src);
+        setIsLoading(false);
+        handleLoad();
+      };
+      img.onerror = handleError;
+    }, [src]);
+    
+    return (
+      <>
+        {isLoading && <div className="media-loading">Loading...</div>}
+        <img 
+          src={currentSrc}
+          alt={alt}
+          className={`centered-media ${isLoading ? 'loading' : ''}`}
+          style={{ filter: isLoading ? 'blur(5px)' : 'none' }}
+        />
+      </>
+    );
+  };
+
   const renderMedia = () => {
-    if (error) {
+    if (error && imageError) {
       return (
         <div className="media-error">
           <p>Failed to load media</p>
@@ -108,12 +125,9 @@ function MediaItem({ post }) {
     switch (mediaInfo.type) {
       case 'image':
         return (
-          <img 
+          <ProgressiveImage 
             src={mediaInfo.url}
             alt={post.title}
-            onLoad={handleLoad}
-            onError={handleError}
-            className="centered-media"
           />
         );
       
@@ -123,11 +137,12 @@ function MediaItem({ post }) {
             controls
             loop
             muted
+            preload="metadata"
             onLoadedData={handleLoad}
             onError={handleError}
             src={mediaInfo.url}
             className="centered-media"
-            onClick={(e) => e.stopPropagation()} // Prevent video controls from toggling info
+            onClick={(e) => e.stopPropagation()}
           />
         );
       
@@ -167,13 +182,49 @@ function MediaItem({ post }) {
   };
 
   return (
-    <div className="media-item">
+    <div className={`media-item ${viewMode} ${isSelected ? 'selected' : ''}`}>
+      {viewMode === 'grid' && (
+        <div className="selection-checkbox">
+          <input 
+            type="checkbox" 
+            checked={isSelected} 
+            onChange={onSelect}
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+      
       <div className="media-content" onClick={toggleInfo}>
         {!loaded && !error && mediaInfo.type !== 'redgif' && mediaInfo.type !== 'link' && (
           <div className="media-loading">Loading...</div>
         )}
         
         {renderMedia()}
+        
+        {viewMode === 'feed' && (
+          <div className="media-controls">
+            <button 
+              className="control-btn select-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect();
+              }}
+              aria-label={isSelected ? 'Deselect' : 'Select'}
+            >
+              {isSelected ? '☑' : '☐'}
+            </button>
+            <button 
+              className="control-btn download-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDownload();
+              }}
+              aria-label="Download"
+            >
+              ⬇
+            </button>
+          </div>
+        )}
       </div>
       
       {showInfo && (
@@ -183,14 +234,28 @@ function MediaItem({ post }) {
             <span className="subreddit">r/{post.subreddit}</span>
             <span className="author">Posted by u/{post.author}</span>
           </div>
-          <a 
-            href={`https://reddit.com${post.permalink}`}
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="view-post-button"
-          >
-            View on Reddit
-          </a>
+          <div className="post-actions">
+            <a 
+              href={`https://reddit.com${post.permalink}`}
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="view-post-button"
+              onClick={(e) => e.stopPropagation()}
+            >
+              View on Reddit
+            </a>
+            {viewMode === 'grid' && (
+              <button 
+                className="download-btn-small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDownload();
+                }}
+              >
+                Download
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
