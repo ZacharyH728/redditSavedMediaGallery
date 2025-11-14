@@ -18,6 +18,8 @@ export function ConfigProvider({ children }) {
 
   if (!config.apiUrl) {
     console.warn('Warning: API URL is missing from environment variables');
+  } else {
+    console.log('API URL:', config.apiUrl);
   }
 
   useEffect(() => {

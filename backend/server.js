@@ -10,12 +10,17 @@ const PHOTOS_DIR = '/mnt/Photos';
 const LIMIT = 20;
 
 // --- Middleware ---
-app.use(cors({
-  origin: '*'
-}));
+// app.use(cors({
+//   origin: '*'
+// }));
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/media', express.static(PHOTOS_DIR));
+app.use((req, res, next) => {
+  console.log(`Incoming request: ${req.method} ${req.url}`);
+  next();
+});
 
 // Helper function to get all image files recursively
 async function getImageFiles(dir) {
@@ -96,6 +101,7 @@ app.get('/status', (req, res) => {
     photosDirectory: PHOTOS_DIR
   });
 });
+
 
 // --- Start Server ---
 app.listen(PORT, '0.0.0.0', () => {
