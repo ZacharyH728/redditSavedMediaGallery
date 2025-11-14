@@ -1,0 +1,243 @@
+/* Base Styles */
+:root {
+  --primary-color: #ff4500;
+  --dark-color: #1a1a1b;
+  --light-color: #ffffff;
+  --gray-color: #d7dadc;
+  --background-color: #030303;
+  --card-background: #1a1a1b;
+  --border-color: #343536;
+}
+body, html {
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  background-color: #030303;
+  color: #d7dadc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+
+.app {
+  display: block flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.app-content {
+  padding: 0;
+  margin: 0;
+}
+
+
+/* Header Styles */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 25px;
+  background-color: var(--dark-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.header-logo {
+  font-size: 1rem;
+  font-weight: bold;
+  color: var(--primary-color);
+}
+
+.logout-button {
+  background-color: transparent;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: all 0.2s;
+}
+
+.logout-button:hover {
+  background-color: var(--primary-color);
+  color: white;
+}
+
+/* Auth Styles */
+.auth-container {
+  max-width: 500px;
+  margin: 100px auto;
+  text-align: center;
+  padding: 30px;
+  background-color: var(--card-background);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.login-button {
+  background-color: var(--primary-color);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.login-button:hover {
+  background-color: #e03d00;
+}
+
+/* Gallery Styles */
+.app-content {
+  flex: 1;
+  padding: 20px;
+}
+
+.gallery-container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.gallery-header {
+  margin-bottom: 25px;
+  text-align: center;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.media-item {
+  background-color: var(--card-background);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.2s;
+}
+
+.media-item:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+}
+
+.media-content {
+  position: relative;
+  height: 200px;
+  background-color: #111111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-content img,
+.media-content video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.media-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+.media-error {
+  padding: 20px;
+  text-align: center;
+}
+
+.media-info {
+  padding: 15px;
+}
+
+.media-info h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.post-details {
+  font-size: 0.85rem;
+  color: var(--gray-color);
+  margin-bottom: 15px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.view-post-button {
+  display: block;
+  text-align: center;
+  padding: 8px 0;
+  background-color: var(--primary-color);
+  color: white;
+  text-decoration: none;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+/* Loading Spinner */
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+}
+
+.spinner {
+  border: 4px solid rgba(255, 69, 0, 0.3);
+  border-radius: 50%;
+  border-top: 4px solid var(--primary-color);
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 20px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Error Message */
+.error-message {
+  max-width: 600px;
+  margin: 100px auto;
+  padding: 30px;
+  background-color: var(--card-background);
+  border-left: 5px solid #ff4500;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.no-media {
+  text-align: center;
+  padding: 50px 0;
+  color: var(--gray-color);
+}
+
+/* Footer Styles */
+.app-footer {
+  padding: 20px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--gray-color);
+  background-color: var(--dark-color);
+  border-top: 1px solid var(--border-color);
+}

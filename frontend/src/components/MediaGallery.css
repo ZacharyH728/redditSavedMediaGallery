@@ -1,0 +1,96 @@
+/* Main container */
+.gallery-container {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #030303;
+}
+
+/* REMOVED .gallery-header styles */
+
+/* Main feed container */
+.media-feed {
+  display: flex;
+  flex-direction: column;
+  padding-top: 70px; /* Space for the FIXED AppHeader */
+  padding-bottom: 80px; /* Space for fixed AppFooter */
+}
+
+/* Individual post container */
+.post-container {
+  height: 100vh;
+  width: 100%;
+  background-color: #1a1a1b;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 50px; /* Space between posts */
+  border-radius: 8px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+/* Post separator */
+.post-separator {
+  height: 50px;
+  width: 100%;
+  background-color: transparent;
+}
+
+/* REMOVED .order-toggle-button and .reshuffle-button styles (moved to Header.css) */
+
+/* End of content message */
+.end-message {
+  min-height: calc(100vh - 70px - 80px); /* Adjust height considering AppHeader and bottom padding */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 30px;
+  color: #808080;
+  /* margin-top: 50px; /* Not needed if feed has bottom padding */
+}
+
+.end-message p {
+  font-size: 24px;
+  font-weight: bold;
+  margin-bottom: 30px;
+}
+
+/* REMOVED .end-buttons (buttons are now in AppHeader) */
+
+/* No media found message */
+.no-media {
+  min-height: calc(100vh - 70px - 80px); /* Adjust height */
+  padding-top: 70px; /* Add padding for AppHeader */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  color: #808080;
+}
+
+.no-media p {
+  font-size: 18px;
+  margin: 10px 0;
+}
+
+/* Loading spinner container inside feed */
+.media-feed > .loading-container {
+  min-height: 200px; /* Give spinner some space */
+}
+
+/* Error message */
+.error-message {
+  max-width: 600px;
+  margin: 100px auto 0; /* Add top margin */
+  padding: 30px;
+  background-color: rgba(255, 69, 0, 0.1);
+  border-left: 5px solid #ff4500;
+  border-radius: 4px;
+  text-align: center;
+}
+

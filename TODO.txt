@@ -1,0 +1,2 @@
+remove old posts as new load
+fix bug where its loading the same posts over and over again

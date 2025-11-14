@@ -1,0 +1,41 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "backup" ]
+  pull_request:
+    branches: [ "backup" ]
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set image tag
+      id: tag
+      run: echo "TAG=$(date +%s)" >> $GITHUB_ENV
+    
+    - name: Build the Frontend Docker image
+      run: docker build frontend --file frontend/Dockerfile --tag zacharyh728/reddit-saved-gallery-frontend:${{ env.TAG }}
+    
+    - name: Build the Backend Docker image
+      run: docker build backend --file backend/Dockerfile --tag zacharyh728/reddit-saved-gallery-backend:${{ env.TAG }}
+
+    - name: Log in to Docker Hub
+      run: echo "${{ secrets.DOCKER_KEY }}" | docker login --username "zacharyh728" --password-stdin
+    
+    - name: Tag Frontend image as latest
+      run: docker tag zacharyh728/reddit-saved-gallery-frontend:${{ env.TAG }} zacharyh728/reddit-saved-gallery-frontend:latest
+
+    - name: Tag Backend image as latest
+      run: docker tag zacharyh728/reddit-saved-gallery-backend:${{ env.TAG }} zacharyh728/reddit-saved-gallery-backend:latest
+
+    - name: Push the Frontend Docker image
+      run: docker push zacharyh728/reddit-saved-gallery-frontend:latest
+
+    - name: Push the Backend Docker image
+      run: docker push zacharyh728/reddit-saved-gallery-backend:latest
