@@ -11,8 +11,7 @@ const LIMIT = 20;
 
 // --- Middleware ---
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://reddit.zhill.me'],
-  credentials: true
+  origin: '*'
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
