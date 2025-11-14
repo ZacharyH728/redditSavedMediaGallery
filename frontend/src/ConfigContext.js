@@ -15,6 +15,11 @@ export function ConfigProvider({ children }) {
   // Initialize error state
   const [error, setError] = useState(null);
 
+
+  if (!config.apiUrl) {
+    console.warn('Warning: API URL is missing from environment variables');
+  }
+
   useEffect(() => {
     // Validate required configurations
     if (!config.redditClientId) {
