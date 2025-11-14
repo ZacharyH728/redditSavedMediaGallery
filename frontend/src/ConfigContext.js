@@ -8,8 +8,8 @@ export function ConfigProvider({ children }) {
   // Initialize config with default values instead of undefined
   const [config] = useState({
     redditClientId: process.env.REACT_APP_REDDIT_CLIENT_ID || '',
-    redditCallback: process.env.REACT_APP_URL_REDDIT_CALLBACK || '',
-    apiUrl: process.env.REACT_APP_API_URL || '',
+    redditCallback: process.env.REACT_APP_URL_REDDIT_CALLBACK || '/auth-callback',
+    apiUrl: process.env.REACT_APP_API_URL || 'http://localhost:4000/api',
   });
 
   // Initialize error state
