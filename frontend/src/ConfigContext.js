@@ -9,7 +9,7 @@ export function ConfigProvider({ children }) {
   const [config] = useState({
     redditClientId: process.env.REACT_APP_REDDIT_CLIENT_ID || '',
     redditCallback: process.env.REACT_APP_URL_REDDIT_CALLBACK || '/auth-callback',
-    apiUrl: process.env.REACT_APP_API_URL || 'http://100.127.174.18:4000/api',
+    apiUrl: process.env.REACT_APP_API_URL || 'https://reddit.zhill.me/api',
   });
 
   // Initialize error state
