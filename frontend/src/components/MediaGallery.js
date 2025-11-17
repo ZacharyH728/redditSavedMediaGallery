@@ -57,7 +57,7 @@ function MediaGallery({
       setHasMorePosts(hasMore);
 
     } catch (err) {
-      console.error('Error fetching media:', err);
+      console.error(`Error fetching media at ${config.apiUrl}/media:`, err);
       setError(`Failed to load media: ${err.response?.data?.error || err.message}`);
       setHasMorePosts(false); // Stop fetching on error
     } finally {
