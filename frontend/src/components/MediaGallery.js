@@ -43,8 +43,9 @@ function MediaGallery({
         }
       });
 
-      const newItems = response.data.data.children || [];
-      const hasMore = !!response.data.data.after;
+      const data = response.data.data;
+      const newItems = data?.children || [];
+      const hasMore = !!data?.after;
 
       // Update the *original* list in the App component by appending
       if (newItems.length > 0) {
