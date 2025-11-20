@@ -24,7 +24,7 @@ function MediaItem({ post }) {
         // Encode the path portion of the URL
         const encodedPath = encodeURI(postData.url);
         const fullUrl = `${baseUrl}${encodedPath}`;
-        console.log('Constructed URL:', fullUrl); // Add logging
+        console.log('Constructed URL:', fullUrl, 'Builtin URL:', postData.url); // Add logging
         return { 
           type: 'image', 
           url: fullUrl
