@@ -43,8 +43,9 @@ function MediaGallery({
         }
       });
 
-      const newItems = response.data.data.children || [];
-      const hasMore = !!response.data.data.after;
+      const data = response.data.data;
+      const newItems = data?.children || [];
+      const hasMore = !!data?.after;
 
       // Update the *original* list in the App component by appending
       if (newItems.length > 0) {
@@ -57,7 +58,7 @@ function MediaGallery({
       setHasMorePosts(hasMore);
 
     } catch (err) {
-      console.error('Error fetching media:', err);
+      console.error(`Error fetching media at ${config.apiUrl}/media:`, err);
       setError(`Failed to load media: ${err.response?.data?.error || err.message}`);
       setHasMorePosts(false); // Stop fetching on error
     } finally {
