@@ -1,8 +1,9 @@
 <script>
   // This component has no logic. It just receives a post and displays it.
   let { post } = $props();
-  const baseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
-  const fullUrl = `${baseUrl}${post.url}`;
+  // Use relative path for media, letting Nginx/Vite proxy handle it.
+  // This works seamlessly for localhost, LAN, and production domains.
+  const fullUrl = post.url;
 
   // Helper to determine media type if backend doesn't send it or as a fallback
   function getMediaType(filename, hint) {
