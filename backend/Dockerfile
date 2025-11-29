@@ -13,6 +13,9 @@ COPY package*.json ./
 # Install backend dependencies
 RUN npm install
 
+# Install FFmpeg
+RUN apk update && apk add --no-cache ffmpeg
+
 # Copy the backend server code
 COPY server.js .
 

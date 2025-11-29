@@ -4,12 +4,90 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
 const cors = require('cors');
+const { spawn } = require('child_process');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 
 // --- Middleware ---
 app.use(cors());
+
+// Helper to check pixel format
+function getPixelFormat(filePath) {
+  return new Promise((resolve) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=pix_fmt',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath
+    ]);
+
+    let output = '';
+    ffprobe.stdout.on('data', (data) => output += data.toString());
+    
+    ffprobe.on('close', (code) => {
+      if (code === 0) resolve(output.trim());
+      else resolve(null);
+    });
+    
+    ffprobe.on('error', () => resolve(null));
+  });
+}
+
+// Transcoding middleware for incompatible videos (YUV444)
+app.use('/media', async (req, res, next) => {
+  try {
+    const relativePath = decodeURIComponent(req.path);
+    const fullPath = path.join(PHOTOS_DIR, relativePath);
+
+    // Only process video files
+    if (!/\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i.test(fullPath)) return next();
+
+    // Check if file exists
+    try {
+      await fs.access(fullPath);
+    } catch {
+      return next();
+    }
+
+    const pixFmt = await getPixelFormat(fullPath);
+    
+    // Check for YUV444 formats which browsers don't support hardware decoding for
+    if (pixFmt && pixFmt.includes('yuv444')) {
+      console.log(`Transcoding YUV444 video: ${relativePath} (${pixFmt})`);
+      res.setHeader('Content-Type', 'video/mp4');
+      
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', fullPath,
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-preset', 'ultrafast',
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      ]);
+
+      ffmpeg.stdout.pipe(res);
+      
+      req.on('close', () => {
+        ffmpeg.kill();
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code !== 0 && code !== null) { // null if killed
+           console.error(`ffmpeg conversion ended with code ${code}`);
+        }
+      });
+    } else {
+      next();
+    }
+  } catch (err) {
+    console.error('Error in transcoding middleware:', err);
+    next();
+  }
+});
+
 app.use('/media', express.static(PHOTOS_DIR));
 app.use((req, res, next) => {
   console.log(`Incoming request: ${req.method} ${req.url}`);
@@ -199,4 +277,3 @@ startServer().catch(error => {
   console.error('Failed to start server:', error);
   process.exit(1);
 });
-
