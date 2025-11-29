@@ -19,13 +19,20 @@
   const mediaType = getMediaType(post.title || '', post.post_hint);
   
   let hasError = $state(false);
+  let showTitle = $state(false);
   
   function handleError() {
     hasError = true;
   }
+
+  function toggleTitle() {
+    showTitle = !showTitle;
+  }
 </script>
 
-<div class="media-item">
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="media-item" onclick={toggleTitle}>
   <div class="media-content">
     {#if hasError}
       <div class="error-fallback">
@@ -45,6 +52,7 @@
         autoplay
         muted
         loop
+        playsinline
         onerror={handleError}
       ></video>
     {:else if mediaType === 'audio'}
@@ -65,9 +73,11 @@
       />
     {/if}
   </div>
-  <div class="media-info">
-    <h3 class="post-title">{post.title || 'Untitled'}</h3>
-  </div>
+  {#if showTitle}
+    <div class="media-info">
+      <h3 class="post-title">{post.title || 'Untitled'}</h3>
+    </div>
+  {/if}
 </div>
 
 <style>

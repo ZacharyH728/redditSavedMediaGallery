@@ -1,9 +1,28 @@
 <script>
   // This component is now completely "dumb" and stateless.
   let { isRandomOrder, onToggleOrder, onReshuffle } = $props();
+
+  let lastScrollY = 0;
+  let isHidden = $state(false);
+
+  function handleScroll() {
+    const currentScrollY = window.scrollY;
+    
+    // Hide header if scrolling down and we've scrolled past the header height (approx 60px)
+    // Show header if scrolling up
+    if (currentScrollY > lastScrollY && currentScrollY > 60) {
+      isHidden = true;
+    } else {
+      isHidden = false;
+    }
+    
+    lastScrollY = currentScrollY;
+  }
 </script>
 
-<header class="app-header">
+<svelte:window onscroll={handleScroll} />
+
+<header class="app-header" class:hidden={isHidden}>
   <div class="header-logo">Reddit Saved Media Gallery</div>
   
   <div class="header-controls">
@@ -32,7 +51,21 @@
 </header>
 
 <style>
-  .app-header { background-color: #161b22; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; position: sticky; top: 0; z-index: 100; }
+  .app-header { 
+    background-color: #161b22; 
+    padding: 15px 30px; 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    border-bottom: 1px solid #30363d; 
+    position: sticky; 
+    top: 0; 
+    z-index: 100; 
+    transition: transform 0.3s ease-in-out;
+  }
+  .app-header.hidden {
+    transform: translateY(-100%);
+  }
   .header-logo { font-size: 24px; font-weight: bold; color: #58a6ff; }
   .header-controls { display: flex; align-items: center; gap: 10px; }
   .header-button { padding: 8px 16px; border: 1px solid #30363d; background-color: #21262d; color: #c9d1d9; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 6px; transition: all 0.2s ease; }
