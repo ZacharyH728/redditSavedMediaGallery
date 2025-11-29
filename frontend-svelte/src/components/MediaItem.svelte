@@ -3,11 +3,40 @@
   let { post } = $props();
   const baseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
   const fullUrl = `${baseUrl}${post.url}`;
+
+  // Helper to determine media type if backend doesn't send it or as a fallback
+  function getMediaType(filename, hint) {
+    if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
+    
+    // Fallback based on extension
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'wmv', 'flv', 'm4v'].includes(ext)) return 'video';
+    if (['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ext)) return 'audio';
+    return 'image';
+  }
+
+  const mediaType = getMediaType(post.title || '', post.post_hint);
 </script>
 
 <div class="media-item">
   <div class="media-content">
-    <img src={fullUrl} alt={post.title} class="centered-media" loading="lazy" />
+    {#if mediaType === 'video'}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video 
+        src={fullUrl} 
+        controls 
+        class="centered-media" 
+        preload="metadata"
+        autoplay
+        muted
+        loop
+      ></video>
+    {:else if mediaType === 'audio'}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <audio src={fullUrl} controls class="centered-media audio-player"></audio>
+    {:else}
+      <img src={fullUrl} alt={post.title} class="centered-media" loading="lazy" />
+    {/if}
   </div>
   <div class="media-info">
     <h3 class="post-title">{post.title || 'Untitled'}</h3>
@@ -15,9 +44,28 @@
 </div>
 
 <style>
-  .media-item { background-color: #0d1117; border-radius: 6px; overflow: hidden; border: 1px solid #30363d;}
-  .media-content { background-color: #161b22; }
+  /* 
+    content-visibility: auto 
+    - This is the magic property. It tells the browser "if this element is off-screen, 
+      pretend it has 0 size and don't render its contents".
+    - This drastically reduces CPU/Memory usage for long lists.
+    
+    contain-intrinsic-size: 500px 
+    - Since the browser pretends it has 0 size when off-screen, scrolling would jump around.
+    - This property gives it a placeholder height (approx 500px is a good guess for media cards)
+      so the scrollbar remains stable.
+  */
+  .media-item { 
+    background-color: #0d1117; 
+    border-radius: 6px; 
+    overflow: hidden; 
+    border: 1px solid #30363d;
+    content-visibility: auto; 
+    contain-intrinsic-size: 500px; 
+  }
+  .media-content { background-color: #161b22; display: flex; justify-content: center; align-items: center; min-height: 200px; }
   .centered-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }
+  .audio-player { width: 90%; height: 50px; margin: 20px 0; }
   .media-info { padding: 15px; }
   .post-title { font-size: 16px; font-weight: 500; color: #c9d1d9; margin: 0; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

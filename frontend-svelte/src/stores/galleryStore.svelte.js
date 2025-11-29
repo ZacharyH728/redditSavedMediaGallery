@@ -1,34 +1,53 @@
-// src/stores/galleryStore.js
+// src/stores/galleryStore.svelte.js
 import axios from 'axios';
 import { config } from './config.js';
 
-// Svelte 5 introduces a new, simpler way to create stores using runes.
-// We just create a reactive object with state and actions.
 const store = $state({
   posts: [],
-  isLoading: true,
+  isLoading: false,
   hasMorePosts: true,
   error: null,
-  order: 'random',
-  page: 0,
+  page: 1,
+  seed: Date.now(),
+  order: 'random', // Default order
 
-  // ACTION: Fetches media from the backend
+  // ACTION: Fetches the NEXT page of media
   async fetchMedia() {
-    // Prevent fetching if we're already loading or at the end
-    if (this.isLoading && this.posts.length > 0) return;
-    if (!this.hasMorePosts) return;
+    if (this.isLoading || !this.hasMorePosts) return;
 
     this.isLoading = true;
-    try {
-      const response = await axios.get(`${config.apiUrl}/media`, {
-        params: { page: this.page, order: this.order },
-      });
-      const newItems = response.data.data.children || [];
+    this.error = null;
 
-      // If it's the first page, replace the posts. Otherwise, append.
-      this.posts = this.page === 0 ? newItems : [...this.posts, ...newItems];
-      this.page += 1;
-      this.hasMorePosts = !!response.data.data.after;
+    try {
+      // Pass params to backend: seed, page, and sort order
+      const response = await axios.get(`${config.apiUrl}/media`, {
+        params: {
+          seed: this.seed,
+          page: this.page,
+          sort: this.order
+        }
+      });
+      
+      const newItems = response.data.data.children || [];
+      const hasMore = response.data.data.after;
+
+      if (newItems.length > 0) {
+        // DEDUPLICATION:
+        // Filter out any items that are already in the list.
+        // This is a safety net in case the backend shuffle isn't perfect or state gets desynced.
+        const uniqueNewItems = newItems.filter(newItem => 
+          !this.posts.some(existing => existing.id === newItem.id)
+        );
+
+        // Append the new, unique items
+        this.posts = [...this.posts, ...uniqueNewItems];
+        
+        // Prepare for the next page
+        this.page += 1;
+      }
+      
+      // Update the "has more" flag based on backend response
+      this.hasMorePosts = hasMore;
 
     } catch (err) {
       console.error('Error fetching media:', err);
@@ -38,20 +57,26 @@ const store = $state({
     }
   },
 
-  // ACTION: Sets a new order, resets the state, and fetches the first page
-  async setOrder(newOrder) {
-    this.order = newOrder;
+  // ACTION: Reshuffles the gallery (new seed, reset page)
+  reshuffle() {
     this.posts = [];
-    this.page = 0;
     this.hasMorePosts = true;
     this.error = null;
-    this.isLoading = false; // Ensure we are ready to load
-    await this.fetchMedia();
+    this.isLoading = false;
+    this.page = 1;
+    this.seed = Date.now(); // New seed = new random order
+    this.fetchMedia();
   },
 
-  // ACTION: A simple alias for re-shuffling
-  async reshuffle() {
-    await this.setOrder('random');
+  // ACTION: Sets the sort order and reloads the gallery
+  setOrder(newOrder) {
+    this.order = newOrder;
+    this.reshuffle();
+  },
+
+  // ACTION: Resets the gallery
+  clearAndFetch() {
+    this.reshuffle();
   },
 });
 
