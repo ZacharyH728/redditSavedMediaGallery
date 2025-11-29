@@ -16,11 +16,25 @@
   }
 
   const mediaType = getMediaType(post.title || '', post.post_hint);
+  
+  let hasError = $state(false);
+  
+  function handleError() {
+    hasError = true;
+  }
 </script>
 
 <div class="media-item">
   <div class="media-content">
-    {#if mediaType === 'video'}
+    {#if hasError}
+      <div class="error-fallback">
+        <span class="error-icon">⚠️</span>
+        <p>Media could not be loaded</p>
+        <a href={fullUrl} target="_blank" rel="noopener noreferrer" class="download-link">
+          Open original file
+        </a>
+      </div>
+    {:else if mediaType === 'video'}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video 
         src={fullUrl} 
@@ -30,12 +44,24 @@
         autoplay
         muted
         loop
+        onerror={handleError}
       ></video>
     {:else if mediaType === 'audio'}
       <!-- svelte-ignore a11y_media_has_caption -->
-      <audio src={fullUrl} controls class="centered-media audio-player"></audio>
+      <audio 
+        src={fullUrl} 
+        controls 
+        class="centered-media audio-player"
+        onerror={handleError}
+      ></audio>
     {:else}
-      <img src={fullUrl} alt={post.title} class="centered-media" loading="lazy" />
+      <img 
+        src={fullUrl} 
+        alt={post.title} 
+        class="centered-media" 
+        loading="lazy" 
+        onerror={handleError}
+      />
     {/if}
   </div>
   <div class="media-info">
@@ -66,6 +92,9 @@
   .media-content { background-color: #161b22; display: flex; justify-content: center; align-items: center; min-height: 200px; }
   .centered-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }
   .audio-player { width: 90%; height: 50px; margin: 20px 0; }
+  .error-fallback { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #8b949e; gap: 10px; text-align: center; padding: 20px; }
+  .error-icon { font-size: 24px; }
+  .download-link { color: #58a6ff; text-decoration: none; font-size: 14px; border: 1px solid #30363d; padding: 5px 10px; border-radius: 6px; }
   .media-info { padding: 15px; }
   .post-title { font-size: 16px; font-weight: 500; color: #c9d1d9; margin: 0; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
