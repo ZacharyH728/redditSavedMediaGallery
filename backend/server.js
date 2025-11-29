@@ -9,16 +9,7 @@ const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 
 // --- Middleware ---
-<<<<<<< HEAD
-// app.use(cors({
-//   origin: '*'
-// }));
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-=======
-app.use(cors());
->>>>>>> svelte-rewrite
 app.use('/media', express.static(PHOTOS_DIR));
 app.use((req, res, next) => {
   console.log(`Incoming request: ${req.method} ${req.url}`);
@@ -196,12 +187,6 @@ async function startServer() {
   // Initial cache fill
   await updateFileCache();
 
-<<<<<<< HEAD
-
-// --- Start Server ---
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend server running on http://0.0.0.0:${PORT}`);
-=======
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n==================================================`);
     console.log(`Simplified Backend server running on http://0.0.0.0:${PORT}`);
@@ -213,6 +198,5 @@ app.listen(PORT, '0.0.0.0', () => {
 startServer().catch(error => {
   console.error('Failed to start server:', error);
   process.exit(1);
->>>>>>> svelte-rewrite
 });
 
