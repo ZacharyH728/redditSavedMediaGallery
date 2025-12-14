@@ -1,15 +1,9 @@
 <script>
-  // This component has no logic. It just receives a post and displays it.
   let { post } = $props();
-  // Use relative path for media, letting Nginx/Vite proxy handle it.
-  // This works seamlessly for localhost, LAN, and production domains.
   const fullUrl = post.url;
 
-  // Helper to determine media type if backend doesn't send it or as a fallback
   function getMediaType(filename, hint) {
     if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
-    
-    // Fallback based on extension
     const ext = filename.split('.').pop().toLowerCase();
     if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'wmv', 'flv', 'm4v'].includes(ext)) return 'video';
     if (['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ext)) return 'audio';
@@ -21,6 +15,32 @@
   let hasError = $state(false);
   let showTitle = $state(false);
   
+  // Optimization: Reference to the video DOM element
+  let mediaElement = $state(null);
+
+  // Optimization: Intersection Observer for Auto-Play/Pause
+  // This drastically reduces CPU usage by pausing off-screen videos
+  $effect(() => {
+    if (!mediaElement || mediaType !== 'video') return;
+
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (entry.isIntersecting) {
+        // Play when visible. Catch error to prevent "Uncaught (in promise)" if user hasn't interacted yet.
+        mediaElement.play().catch(() => {
+             // Browser might block autoplay until user interacts with DOM
+             // This is normal/expected behavior.
+        });
+      } else {
+        // Pause immediately when out of view
+        mediaElement.pause();
+      }
+    }, { threshold: 0.25 }); // 25% visible to start playing
+
+    observer.observe(mediaElement);
+    return () => observer.disconnect();
+  });
+
   function handleError() {
     hasError = true;
   }
@@ -44,12 +64,13 @@
       </div>
     {:else if mediaType === 'video'}
       <!-- svelte-ignore a11y_media_has_caption -->
+      <!-- Optimization: Removed 'autoplay'. Added bind:this -->
       <video 
+        bind:this={mediaElement}
         src={fullUrl} 
         controls 
         class="centered-media" 
         preload="metadata"
-        autoplay
         muted
         loop
         playsinline
@@ -82,15 +103,9 @@
 
 <style>
   /* 
-    content-visibility: auto 
-    - This is the magic property. It tells the browser "if this element is off-screen, 
-      pretend it has 0 size and don't render its contents".
-    - This drastically reduces CPU/Memory usage for long lists.
-    
-    contain-intrinsic-size: 500px 
-    - Since the browser pretends it has 0 size when off-screen, scrolling would jump around.
-    - This property gives it a placeholder height (approx 500px is a good guess for media cards)
-      so the scrollbar remains stable.
+     Optimization: Retained content-visibility 
+     This works in tandem with the IntersectionObserver above.
+     content-visibility handles layout/paint, IntersectionObserver handles media playback.
   */
   .media-item { 
     background-color: #0d1117; 

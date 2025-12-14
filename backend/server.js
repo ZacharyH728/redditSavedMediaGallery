@@ -1,19 +1,33 @@
-// backend/server.js - SIMPLIFIED
-
+// backend/server.js - OPTIMIZED
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
 const cors = require('cors');
 const { spawn } = require('child_process');
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
+const CACHE_FILE = path.join(__dirname, 'media_cache.json');
+
+// --- Caches ---
+// 1. Transcode Cache: path -> string (pixel format) or null
+const transcodeCache = new Map();
+// 2. Query Cache: key (seed+sort) -> array (sorted file list)
+const queryCache = new Map();
+// 3. Global File Index
+let globalFileCache = [];
 
 // --- Middleware ---
 app.use(cors());
 
-// Helper to check pixel format
+// Helper to check pixel format (Cached)
 function getPixelFormat(filePath) {
+  // Optimization: Check memory cache first
+  if (transcodeCache.has(filePath)) {
+    return Promise.resolve(transcodeCache.get(filePath));
+  }
+
   return new Promise((resolve) => {
     const ffprobe = spawn('ffprobe', [
       '-v', 'error',
@@ -27,15 +41,20 @@ function getPixelFormat(filePath) {
     ffprobe.stdout.on('data', (data) => output += data.toString());
     
     ffprobe.on('close', (code) => {
-      if (code === 0) resolve(output.trim());
-      else resolve(null);
+      const result = (code === 0) ? output.trim() : null;
+      // Optimization: Store result in cache
+      transcodeCache.set(filePath, result);
+      resolve(result);
     });
     
-    ffprobe.on('error', () => resolve(null));
+    ffprobe.on('error', () => {
+      transcodeCache.set(filePath, null);
+      resolve(null);
+    });
   });
 }
 
-// Transcoding middleware for incompatible videos (YUV444)
+// Transcoding middleware
 app.use('/media', async (req, res, next) => {
   try {
     const relativePath = decodeURIComponent(req.path);
@@ -44,7 +63,7 @@ app.use('/media', async (req, res, next) => {
     // Only process video files
     if (!/\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i.test(fullPath)) return next();
 
-    // Check if file exists
+    // Check if file exists (basic security)
     try {
       await fs.access(fullPath);
     } catch {
@@ -53,9 +72,12 @@ app.use('/media', async (req, res, next) => {
 
     const pixFmt = await getPixelFormat(fullPath);
     
-    // Check for YUV444 formats which browsers don't support hardware decoding for
+    // Check for YUV444 formats
     if (pixFmt && pixFmt.includes('yuv444')) {
-      console.log(`Transcoding YUV444 video: ${relativePath} (${pixFmt})`);
+      // Log only on first transcode start, not every chunk
+      if (!res.headersSent) {
+        console.log(`Transcoding YUV444 video: ${relativePath}`);
+      }
       res.setHeader('Content-Type', 'video/mp4');
       
       const ffmpeg = spawn('ffmpeg', [
@@ -69,52 +91,35 @@ app.use('/media', async (req, res, next) => {
       ]);
 
       ffmpeg.stdout.pipe(res);
-      
-      req.on('close', () => {
-        ffmpeg.kill();
-      });
-
+      req.on('close', () => ffmpeg.kill());
       ffmpeg.on('close', (code) => {
-        if (code !== 0 && code !== null) { // null if killed
-           console.error(`ffmpeg conversion ended with code ${code}`);
-        }
+        if (code !== 0 && code !== null) console.error(`ffmpeg ended: ${code}`);
       });
     } else {
       next();
     }
   } catch (err) {
-    console.error('Error in transcoding middleware:', err);
+    console.error('Transcoding middleware error:', err);
     next();
   }
 });
 
 app.use('/media', express.static(PHOTOS_DIR));
-app.use((req, res, next) => {
-  console.log(`Incoming request: ${req.method} ${req.url}`);
-  next();
-});
 
 // --- Utilities ---
-// Simple Linear Congruential Generator for seeded random numbers
 function createSeededRandom(seed) {
-  // If no seed is provided, use Math.random
   if (!seed) return Math.random;
-
-  // Simple LCG parameters
   let state = seed % 2147483647;
   if (state <= 0) state += 2147483646;
-
   return function() {
     state = (state * 16807) % 2147483647;
     return (state - 1) / 2147483646;
   };
 }
 
-// Standard Fisher-Yates (aka Knuth) Shuffle function with seed support.
 function shuffleArray(array, seed = null) {
   let currentIndex = array.length, randomIndex;
   const newArray = [...array];
-  // Create a seeded random function, or use Math.random if no seed
   const randomFn = seed ? createSeededRandom(seed) : Math.random;
 
   while (currentIndex !== 0) {
@@ -126,37 +131,31 @@ function shuffleArray(array, seed = null) {
   return newArray;
 }
 
-// --- File Discovery Logic ---
-// Define supported extensions once
+// --- File Discovery ---
 const imageExts = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff)$/i;
 const videoExts = /\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i;
 const audioExts = /\.(mp3|wav|ogg|m4a|flac|aac)$/i;
 
 async function getImageFiles(dir) {
   try {
-    // Read directory contents
     const dirents = await fs.readdir(dir, { withFileTypes: true });
     
-    // Process all entries in parallel
     const filesPromises = dirents.map(async (dirent) => {
       const fullPath = path.join(dir, dirent.name);
       
       try {
         if (dirent.isDirectory()) {
-          // Recursive call for subdirectories
           return await getImageFiles(fullPath);
         } else {
-          // Check file type
           let type = null;
           if (imageExts.test(dirent.name)) type = 'image';
           else if (videoExts.test(dirent.name)) type = 'video';
           else if (audioExts.test(dirent.name)) type = 'audio';
 
           if (type) {
-            // Get stats for sorting by date
+            // Optimization: Get stats strictly for what we need
             const stats = await fs.stat(fullPath);
             const relativePath = path.relative(PHOTOS_DIR, fullPath).replace(/\\/g, '/');
-            // Encode the path parts to handle spaces and special chars in URLs
             const encodedUrlPath = relativePath.split('/').map(encodeURIComponent).join('/');
             
             return [{
@@ -166,78 +165,100 @@ async function getImageFiles(dir) {
               created_utc: stats.birthtimeMs / 1000,
               author: 'Local Library',
               subreddit: path.basename(path.dirname(fullPath)),
-              post_hint: type, // 'image', 'video', or 'audio'
+              post_hint: type,
             }];
           }
         }
       } catch (err) {
         console.error(`Error processing file ${fullPath}:`, err.message);
-        return []; // Skip this specific file on error
+        return []; 
       }
-      return []; // Return empty array if not a media file
+      return []; 
     });
 
-    // Wait for all promises to resolve and flatten the results
     const results = await Promise.all(filesPromises);
     return results.flat();
 
   } catch (error) {
     console.error(`Error scanning directory ${dir}:`, error.message);
-    return []; // Return empty if the directory itself cannot be read
+    return []; 
   }
 }
 
-// --- In-Memory Cache ---
-let globalFileCache = [];
-
 async function updateFileCache() {
-  console.log('Updating file cache...');
+  console.log('Updating file cache from disk...');
   const start = Date.now();
   globalFileCache = await getImageFiles(PHOTOS_DIR);
+  
+  // Optimization: Write cache to disk
+  try {
+    await fs.writeFile(CACHE_FILE, JSON.stringify(globalFileCache));
+    console.log(`Cache persisted to ${CACHE_FILE}`);
+  } catch (err) {
+    console.error('Failed to write cache file:', err);
+  }
+  
+  // Clear dependent caches
+  queryCache.clear(); 
+  transcodeCache.clear();
+  
   console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
+}
+
+// --- Load Cache on Start ---
+async function loadCacheFromDisk() {
+  try {
+    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    globalFileCache = JSON.parse(data);
+    console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
+  } catch (err) {
+    console.log('No persistent cache found, scanning now...');
+    await updateFileCache();
+  }
 }
 
 // --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
-    // Get query parameters for pagination, seeding, and sorting
     const limit = 25;
     const page = parseInt(req.query.page) || 1;
     const sort = req.query.sort || 'random';
+    const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();
     
-    // 1. Use the cached list of files
+    // Optimization: Generate a unique key for this view configuration
+    const cacheKey = `${sort}_${seed}`;
+
     if (globalFileCache.length === 0) {
-      // Try to populate if empty (first run race condition or empty folder)
+      // Fallback if empty
       await updateFileCache();
     }
-    
-    if (globalFileCache.length === 0) {
-      return res.json({ data: { children: [], after: null } });
-    }
 
-    let processedFiles = [...globalFileCache];
+    let processedFiles;
 
-    if (sort === 'random') {
-      // Use a provided seed or generate a random one if not provided
-      const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();
-      // Shuffle using the seed
-      processedFiles = shuffleArray(processedFiles, seed);
-    } else if (sort === 'date') {
-      // Sort by creation date (newest first)
-      processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+    // Optimization: Check Query Cache
+    if (queryCache.has(cacheKey)) {
+      processedFiles = queryCache.get(cacheKey);
     } else {
-      // Default to filename sort if unknown
-      processedFiles.sort((a, b) => a.title.localeCompare(b.title));
+      // If not in cache, calculate and store it
+      // NOTE: This prevents re-sorting/re-shuffling on every page turn
+      processedFiles = [...globalFileCache];
+      
+      if (sort === 'random') {
+        processedFiles = shuffleArray(processedFiles, seed);
+      } else if (sort === 'date') {
+        processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+      } else {
+        processedFiles.sort((a, b) => a.title.localeCompare(b.title));
+      }
+
+      // Store in LRU-like cache (simple cleanup strategy could be added)
+      if (queryCache.size > 100) queryCache.clear(); // Simple preventive clear
+      queryCache.set(cacheKey, processedFiles);
     }
 
-    // 3. Calculate start and end indices for pagination
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
-
-    // 4. Slice the array to get just the current page's files
     const files = processedFiles.slice(startIndex, endIndex);
-    
-    // 5. Determine if there are more files
     const hasMore = endIndex < processedFiles.length;
 
     res.json({
@@ -252,9 +273,7 @@ app.get('/api/media', async (req, res) => {
   }
 });
 
-// --- Server Initialization ---
 async function startServer() {
-  // Ensure the media directory exists before starting.
   try {
     await fs.access(PHOTOS_DIR);
   } catch (error) {
@@ -262,12 +281,12 @@ async function startServer() {
     await fs.mkdir(PHOTOS_DIR, { recursive: true });
   }
   
-  // Initial cache fill
-  await updateFileCache();
+  // Optimization: Load from disk first
+  await loadCacheFromDisk();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n==================================================`);
-    console.log(`Simplified Backend server running on http://0.0.0.0:${PORT}`);
+    console.log(`Optimized Backend server running on http://0.0.0.0:${PORT}`);
     console.log(`Serving media from: ${PHOTOS_DIR}`);
     console.log(`==================================================\n`);
   });
