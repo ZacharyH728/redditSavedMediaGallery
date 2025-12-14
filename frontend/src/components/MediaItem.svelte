@@ -1,4 +1,6 @@
 <script>
+  import { audioPreferences } from '../stores/preferencesStore.svelte.js';
+
   let { post } = $props();
   const fullUrl = post.url;
 
@@ -18,18 +20,32 @@
   // Optimization: Reference to the video DOM element
   let mediaElement = $state(null);
 
+  // Sync with global mute state
+  $effect(() => {
+    if (mediaElement && mediaType === 'video') {
+      mediaElement.muted = audioPreferences.muted;
+    }
+  });
+
+  // Handle user toggling mute on this specific video
+  function handleVolumeChange(e) {
+    if (mediaType === 'video') {
+      // Update global state, which will trigger the effect above for ALL videos
+      // preventing "race conditions" where one stays muted.
+      audioPreferences.muted = e.target.muted;
+    }
+  }
+
   // Optimization: Intersection Observer for Auto-Play/Pause
-  // This drastically reduces CPU usage by pausing off-screen videos
   $effect(() => {
     if (!mediaElement || mediaType !== 'video') return;
 
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[0];
       if (entry.isIntersecting) {
-        // Play when visible. Catch error to prevent "Uncaught (in promise)" if user hasn't interacted yet.
+        // Play when visible
         mediaElement.play().catch(() => {
              // Browser might block autoplay until user interacts with DOM
-             // This is normal/expected behavior.
         });
       } else {
         // Pause immediately when out of view
@@ -64,16 +80,16 @@
       </div>
     {:else if mediaType === 'video'}
       <!-- svelte-ignore a11y_media_has_caption -->
-      <!-- Optimization: Removed 'autoplay'. Added bind:this -->
       <video 
         bind:this={mediaElement}
         src={fullUrl} 
         controls 
         class="centered-media" 
         preload="metadata"
-        muted
         loop
         playsinline
+        muted={audioPreferences.muted}
+        onvolumechange={handleVolumeChange}
         onerror={handleError}
       ></video>
     {:else if mediaType === 'audio'}
@@ -102,11 +118,6 @@
 </div>
 
 <style>
-  /* 
-     Optimization: Retained content-visibility 
-     This works in tandem with the IntersectionObserver above.
-     content-visibility handles layout/paint, IntersectionObserver handles media playback.
-  */
   .media-item { 
     background-color: #0d1117; 
     border-radius: 6px; 

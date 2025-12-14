@@ -1,19 +1,38 @@
 <script>
-  // This component is now completely "dumb" and stateless.
   let { isRandomOrder, onToggleOrder, onReshuffle } = $props();
 
-  let lastScrollY = 0;
+  let lastScrollY = $state(0);
   let isHidden = $state(false);
+  let scrollUpDistance = 0; // Track how far we've scrolled up
+
+  const SCROLL_THRESHOLD = 50; // Pixels to scroll up before showing header
 
   function handleScroll() {
     const currentScrollY = window.scrollY;
+    const direction = currentScrollY > lastScrollY ? 'down' : 'up';
     
-    // Hide header if scrolling down and we've scrolled past the header height (approx 60px)
-    // Show header if scrolling up
-    if (currentScrollY > lastScrollY && currentScrollY > 60) {
-      isHidden = true;
-    } else {
+    // Always show if we are at the very top
+    if (currentScrollY < 10) {
       isHidden = false;
+      scrollUpDistance = 0;
+      lastScrollY = currentScrollY;
+      return;
+    }
+
+    if (direction === 'down') {
+      // If scrolling down, hide immediately and reset up-counter
+      if (currentScrollY > 60) {
+        isHidden = true;
+      }
+      scrollUpDistance = 0;
+    } else {
+      // If scrolling up, accumulate distance
+      scrollUpDistance += (lastScrollY - currentScrollY);
+      
+      // Only show if we've scrolled up enough
+      if (scrollUpDistance > SCROLL_THRESHOLD) {
+        isHidden = false;
+      }
     }
     
     lastScrollY = currentScrollY;
