@@ -140,6 +140,19 @@ async function getImageFiles(dir) {
   try {
     const dirents = await fs.readdir(dir, { withFileTypes: true });
     
+    // --- LIVE PHOTO DEDUPLICATION LOGIC ---
+    // 1. Identify all image base names in this specific directory first.
+    //    If we have 'vacation.heic', we store 'vacation' in the set.
+    const imageBaseNames = new Set();
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory() && imageExts.test(dirent.name)) {
+        // 'IMG_1234.HEIC' -> 'img_1234'
+        const baseName = path.parse(dirent.name).name.toLowerCase();
+        imageBaseNames.add(baseName);
+      }
+    }
+    // --------------------------------------
+
     const filesPromises = dirents.map(async (dirent) => {
       const fullPath = path.join(dir, dirent.name);
       
@@ -153,6 +166,15 @@ async function getImageFiles(dir) {
           else if (audioExts.test(dirent.name)) type = 'audio';
 
           if (type) {
+            // Check for Live Photo duplicate
+            if (type === 'video') {
+              const baseName = path.parse(dirent.name).name.toLowerCase();
+              // If there is an image with the exact same name, assume this video is just the "Live" part
+              if (imageBaseNames.has(baseName)) {
+                return []; // SKIP this file
+              }
+            }
+
             // Optimization: Get stats strictly for what we need
             const stats = await fs.stat(fullPath);
             const relativePath = path.relative(PHOTOS_DIR, fullPath).replace(/\\/g, '/');
