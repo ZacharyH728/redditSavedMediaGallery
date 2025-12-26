@@ -3,7 +3,6 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
 const cors = require('cors');
-const { spawn } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -11,99 +10,15 @@ const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 
 // --- Caches ---
-// 1. Transcode Cache: path -> string (pixel format) or null
-const transcodeCache = new Map();
-// 2. Query Cache: key (seed+sort) -> array (sorted file list)
+// 1. Query Cache: key (seed+sort) -> array (sorted file list)
 const queryCache = new Map();
-// 3. Global File Index
+// 2. Global File Index
 let globalFileCache = [];
 
 // --- Middleware ---
 app.use(cors());
 
-// Helper to check pixel format (Cached)
-function getPixelFormat(filePath) {
-  // Optimization: Check memory cache first
-  if (transcodeCache.has(filePath)) {
-    return Promise.resolve(transcodeCache.get(filePath));
-  }
-
-  return new Promise((resolve) => {
-    const ffprobe = spawn('ffprobe', [
-      '-v', 'error',
-      '-select_streams', 'v:0',
-      '-show_entries', 'stream=pix_fmt',
-      '-of', 'default=noprint_wrappers=1:nokey=1',
-      filePath
-    ]);
-
-    let output = '';
-    ffprobe.stdout.on('data', (data) => output += data.toString());
-    
-    ffprobe.on('close', (code) => {
-      const result = (code === 0) ? output.trim() : null;
-      // Optimization: Store result in cache
-      transcodeCache.set(filePath, result);
-      resolve(result);
-    });
-    
-    ffprobe.on('error', () => {
-      transcodeCache.set(filePath, null);
-      resolve(null);
-    });
-  });
-}
-
-// Transcoding middleware
-app.use('/media', async (req, res, next) => {
-  try {
-    const relativePath = decodeURIComponent(req.path);
-    const fullPath = path.join(PHOTOS_DIR, relativePath);
-
-    // Only process video files
-    if (!/\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i.test(fullPath)) return next();
-
-    // Check if file exists (basic security)
-    try {
-      await fs.access(fullPath);
-    } catch {
-      return next();
-    }
-
-    const pixFmt = await getPixelFormat(fullPath);
-    
-    // Check for YUV444 formats
-    if (pixFmt && pixFmt.includes('yuv444')) {
-      // Log only on first transcode start, not every chunk
-      if (!res.headersSent) {
-        console.log(`Transcoding YUV444 video: ${relativePath}`);
-      }
-      res.setHeader('Content-Type', 'video/mp4');
-      
-      const ffmpeg = spawn('ffmpeg', [
-        '-i', fullPath,
-        '-c:v', 'libx264',
-        '-pix_fmt', 'yuv420p',
-        '-preset', 'ultrafast',
-        '-f', 'mp4',
-        '-movflags', 'frag_keyframe+empty_moov',
-        'pipe:1'
-      ]);
-
-      ffmpeg.stdout.pipe(res);
-      req.on('close', () => ffmpeg.kill());
-      ffmpeg.on('close', (code) => {
-        if (code !== 0 && code !== null) console.error(`ffmpeg ended: ${code}`);
-      });
-    } else {
-      next();
-    }
-  } catch (err) {
-    console.error('Transcoding middleware error:', err);
-    next();
-  }
-});
-
+// Serve static files via Node.js as a fallback (primary serving happens via Nginx)
 app.use('/media', express.static(PHOTOS_DIR));
 
 // --- Utilities ---
@@ -222,7 +137,6 @@ async function updateFileCache() {
   
   // Clear dependent caches
   queryCache.clear(); 
-  transcodeCache.clear();
   
   console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
 }
