@@ -50,4 +50,10 @@
   .app { display: flex; flex-direction: column; min-height: 100vh; }
   .app-content { flex: 1; padding: 20px; max-width: 1200px; margin: 0 auto; width: 100%; }
   .app-footer { background-color: #161b22; padding: 20px; text-align: center; border-top: 1px solid #30363d; }
+
+  @media (max-width: 768px) {
+    .app-content {
+      padding: 0;
+    }
+  }
 </style>

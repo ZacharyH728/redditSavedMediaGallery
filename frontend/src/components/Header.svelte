@@ -91,4 +91,20 @@
   .header-button:hover { background-color: #30363d; border-color: #58a6ff; }
   .order-toggle-button.random-active { background-color: #1f6feb; border-color: #1f6feb; }
   .order-toggle-button.default-active { background-color: #238636; border-color: #238636; }
+
+  @media (max-width: 768px) {
+    .app-header {
+      padding: 10px 15px;
+    }
+    .header-logo {
+      font-size: 18px;
+    }
+    .header-button {
+      padding: 6px 12px;
+      font-size: 13px;
+    }
+    .button-icon {
+      font-size: 16px;
+    }
+  }
 </style>

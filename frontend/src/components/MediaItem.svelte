@@ -16,6 +16,7 @@
   
   let hasError = $state(false);
   let showTitle = $state(false);
+  let showControls = $state(false);
   
   // Optimization: Reference to the video DOM element
   let mediaElement = $state(null);
@@ -64,6 +65,14 @@
   function toggleTitle() {
     showTitle = !showTitle;
   }
+
+  function handleVideoClick(e) {
+    if (!showControls) {
+      e.preventDefault();
+      e.stopPropagation();
+      showControls = true;
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -80,10 +89,12 @@
       </div>
     {:else if mediaType === 'video'}
       <!-- svelte-ignore a11y_media_has_caption -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <video 
         bind:this={mediaElement}
         src={fullUrl} 
-        controls 
+        controls={showControls}
         class="centered-media" 
         preload="metadata"
         loop
@@ -91,6 +102,7 @@
         muted={audioPreferences.muted}
         onvolumechange={handleVolumeChange}
         onerror={handleError}
+        onclick={handleVideoClick}
       ></video>
     {:else if mediaType === 'audio'}
       <!-- svelte-ignore a11y_media_has_caption -->
