@@ -19,7 +19,12 @@
           galleryStore.fetchMedia();
         }
       },
-      { threshold: 0.1 }
+      { 
+        threshold: 0.1,
+        // Trigger fetch when the sentinel is within 800px of entering the viewport.
+        // This effectively "preloads" the next page of content.
+        rootMargin: '1500px'
+      }
     );
 
     observer.observe(sentinelElement);
