@@ -100,6 +100,7 @@ async function getImageFiles(dir) {
               url: `/media/${encodedUrlPath}`,
               title: dirent.name,
               created_utc: stats.birthtimeMs / 1000,
+              modified_utc: stats.mtimeMs / 1000,
               author: 'Local Library',
               subreddit: path.basename(path.dirname(fullPath)),
               post_hint: type,
@@ -183,6 +184,8 @@ app.get('/api/media', async (req, res) => {
         processedFiles = shuffleArray(processedFiles, seed);
       } else if (sort === 'date') {
         processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+      } else if (sort === 'modified') {
+        processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else {
         processedFiles.sort((a, b) => a.title.localeCompare(b.title));
       }
