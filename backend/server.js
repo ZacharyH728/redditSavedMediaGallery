@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
 const cors = require('cors');
+const chokidar = require('chokidar');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -154,6 +155,33 @@ async function loadCacheFromDisk() {
   }
 }
 
+// --- Watcher ---
+let debounceTimer;
+function scheduleCacheUpdate() {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    console.log('File change detected. Updating cache...');
+    updateFileCache();
+  }, 5000); // 5 seconds debounce
+}
+
+function startWatcher() {
+  const watcher = chokidar.watch(PHOTOS_DIR, {
+    ignored: /(^|[\/\\])\../, // ignore dotfiles
+    persistent: true,
+    ignoreInitial: true, // Don't trigger on existing files at startup
+    depth: 99
+  });
+
+  watcher
+    .on('add', path => scheduleCacheUpdate())
+    .on('unlink', path => scheduleCacheUpdate());
+    // .on('change', ...) - usually we don't care if content changes, only if files are added/removed for the gallery list, 
+    // but if metadata changes it might be useful. Keeping it simple for now.
+    
+  console.log('File watcher started on ' + PHOTOS_DIR);
+}
+
 // --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
@@ -212,6 +240,16 @@ app.get('/api/media', async (req, res) => {
   }
 });
 
+app.get('/api/refresh', async (req, res) => {
+  try {
+    await updateFileCache();
+    res.json({ message: 'Cache updated successfully', count: globalFileCache.length });
+  } catch (error) {
+    console.error("Error in /api/refresh:", error);
+    res.status(500).json({ error: 'Failed to update cache' });
+  }
+});
+
 async function startServer() {
   try {
     await fs.access(PHOTOS_DIR);
@@ -222,6 +260,9 @@ async function startServer() {
   
   // Optimization: Load from disk first
   await loadCacheFromDisk();
+
+  // Start watching for changes
+  startWatcher();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n==================================================`);
