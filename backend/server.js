@@ -185,7 +185,7 @@ function startWatcher() {
 // --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
-    const limit = 25;
+    const limit = 50;
     const page = parseInt(req.query.page) || 1;
     const sort = req.query.sort || 'random';
     const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();

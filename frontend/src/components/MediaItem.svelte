@@ -96,7 +96,7 @@
         src={fullUrl} 
         controls={showControls}
         class="centered-media" 
-        preload="metadata"
+        preload="auto"
         loop
         playsinline
         muted={audioPreferences.muted}
@@ -117,7 +117,6 @@
         src={fullUrl} 
         alt={post.title} 
         class="centered-media" 
-        loading="lazy" 
         onerror={handleError}
       />
     {/if}

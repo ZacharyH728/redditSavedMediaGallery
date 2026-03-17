@@ -2,6 +2,27 @@
 import axios from 'axios';
 import { config } from './config.js';
 
+function getMediaType(filename, hint) {
+  if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
+  const ext = (filename || '').split('.').pop().toLowerCase();
+  if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'wmv', 'flv', 'm4v'].includes(ext)) return 'video';
+  if (['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ext)) return 'audio';
+  return 'image';
+}
+
+function preloadItems(items) {
+  for (const item of items) {
+    const type = getMediaType(item.title || '', item.post_hint);
+    if (type === 'image') {
+      new Image().src = item.url;
+    } else if (type === 'video') {
+      const video = document.createElement('video');
+      video.preload = 'auto';
+      video.src = item.url;
+    }
+  }
+}
+
 const store = $state({
   posts: [],
   isLoading: false,
@@ -41,7 +62,10 @@ const store = $state({
 
         // Append the new, unique items
         this.posts = [...this.posts, ...uniqueNewItems];
-        
+
+        // Preload media bytes in the background before they're scrolled to
+        preloadItems(uniqueNewItems);
+
         // Prepare for the next page
         this.page += 1;
       }
