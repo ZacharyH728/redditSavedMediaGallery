@@ -2,7 +2,6 @@
   import Header from './components/Header.svelte';
   import MediaGallery from './components/MediaGallery.svelte';
   import { galleryStore } from './stores/galleryStore.svelte.js';
-  import { mediaPolicy } from './stores/preferencesStore.svelte.js';
   import { onMount } from 'svelte';
 
   // This is the correct way to use $derived.
@@ -14,14 +13,19 @@
       galleryStore.fetchMedia();
     }
 
-    // In iOS standalone (home screen web app) mode, video.play() is blocked
-    // unless called from within a user gesture. Capture the first touchstart
-    // so that MediaItem components can prime themselves and become playable.
-    function unlockMedia() {
-      mediaPolicy.unlocked = true;
+    // iOS standalone (home screen web app) blocks video.play() unless the call
+    // originates synchronously from a user gesture. $effect is async (microtask),
+    // so reactive state changes can't be used here. Instead, call play() directly
+    // on all video elements while still inside the touchstart handler stack.
+    // This primes each element; WebKit then allows the IntersectionObserver's
+    // play() calls on those same elements for the rest of the session.
+    function unlockVideos() {
+      document.querySelectorAll('video').forEach(video => {
+        video.play().then(() => video.pause()).catch(() => {});
+      });
     }
-    document.addEventListener('touchstart', unlockMedia, { once: true, capture: true });
-    return () => document.removeEventListener('touchstart', unlockMedia, true);
+    document.addEventListener('touchstart', unlockVideos, { once: true, capture: true });
+    return () => document.removeEventListener('touchstart', unlockVideos, true);
   });
 
   function handleReshuffle() {
