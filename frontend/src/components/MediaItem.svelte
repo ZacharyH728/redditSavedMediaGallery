@@ -37,26 +37,35 @@
     }
   }
 
-  // Optimization: Intersection Observer for Auto-Play/Pause
+  // Track viewport visibility so canplay handler knows whether to start playback
+  let isVisible = false;
+
+  // Intersection Observer for Auto-Play/Pause
   $effect(() => {
     if (!mediaElement || mediaType !== 'video') return;
 
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[0];
+      isVisible = entry.isIntersecting;
       if (entry.isIntersecting) {
-        // Play when visible
-        mediaElement.play().catch(() => {
-             // Browser might block autoplay until user interacts with DOM
-        });
+        mediaElement.play().catch(() => {});
       } else {
-        // Pause immediately when out of view
         mediaElement.pause();
       }
-    }, { threshold: 0.25 }); // 25% visible to start playing
+    }, { threshold: 0.25 });
 
     observer.observe(mediaElement);
     return () => observer.disconnect();
   });
+
+  // Retry play when buffered data arrives — fixes videos stuck in loading state.
+  // The intersection observer's play() call can fail if the video hasn't buffered yet;
+  // this fires once the browser has enough data and resumes if still in viewport.
+  function handleCanPlay() {
+    if (isVisible && mediaElement) {
+      mediaElement.play().catch(() => {});
+    }
+  }
 
   function handleError() {
     hasError = true;
@@ -91,18 +100,19 @@
       <!-- svelte-ignore a11y_media_has_caption -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <video 
+      <video
         bind:this={mediaElement}
-        src={fullUrl} 
+        src={fullUrl}
         controls={showControls}
-        class="centered-media" 
-        preload="auto"
+        class="centered-media"
+        preload="metadata"
         loop
         playsinline
         muted={audioPreferences.muted}
         onvolumechange={handleVolumeChange}
         onerror={handleError}
         onclick={handleVideoClick}
+        oncanplay={handleCanPlay}
       ></video>
     {:else if mediaType === 'audio'}
       <!-- svelte-ignore a11y_media_has_caption -->

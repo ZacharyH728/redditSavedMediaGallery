@@ -15,11 +15,10 @@ function preloadItems(items) {
     const type = getMediaType(item.title || '', item.post_hint);
     if (type === 'image') {
       new Image().src = item.url;
-    } else if (type === 'video') {
-      const video = document.createElement('video');
-      video.preload = 'auto';
-      video.src = item.url;
     }
+    // Videos are not preloaded here — off-screen video elements with preload="auto"
+    // saturate the browser's connection pool and starve visible videos of bandwidth.
+    // Each MediaItem fetches only metadata on mount and buffers on play().
   }
 }
 
