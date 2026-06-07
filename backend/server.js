@@ -1,110 +1,283 @@
-// backend/server.js
-
+// backend/server.js - OPTIMIZED
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
 const cors = require('cors');
+const chokidar = require('chokidar');
+
 const app = express();
 const PORT = process.env.PORT || 4000;
-const PHOTOS_DIR = '/mnt/Photos';
-const LIMIT = 20;
+const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
+const CACHE_FILE = path.join(__dirname, 'media_cache.json');
+
+// --- Caches ---
+// 1. Query Cache: key (seed+sort) -> array (sorted file list)
+const queryCache = new Map();
+// 2. Global File Index
+let globalFileCache = [];
 
 // --- Middleware ---
-// app.use(cors({
-//   origin: '*'
-// }));
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
+// Serve static files via Node.js as a fallback (primary serving happens via Nginx)
 app.use('/media', express.static(PHOTOS_DIR));
 app.use((req, res, next) => {
   console.log(`Incoming request: ${req.method} ${req.url}`);
   next();
 });
 
-// Helper function to get all image files recursively
-async function getImageFiles(dir) {
-  const files = await fs.readdir(dir, { withFileTypes: true });
-  const imageFiles = [];
-
-  for (const file of files) {
-    const fullPath = path.join(dir, file.name);
-    
-    if (file.isDirectory()) {
-      const subDirFiles = await getImageFiles(fullPath);
-      imageFiles.push(...subDirFiles);
-    } else if (file.isFile() && /\.(jpg|jpeg|png|gif)$/i.test(file.name)) {
-      const stats = await fs.stat(fullPath);
-      const relativePath = path.relative(PHOTOS_DIR, fullPath);
-      // Remove the nested data object structure
-      imageFiles.push({
-        id: Buffer.from(relativePath).toString('base64'),
-        url: `/media/${relativePath}`,
-        title: file.name,
-        created_utc: stats.birthtimeMs / 1000,
-        author: 'Local Library',
-        subreddit: path.basename(path.dirname(fullPath)),
-        post_hint: 'image',
-        thumbnail: `/media/${relativePath}`,
-        is_video: false,
-        permalink: `/media/${relativePath}`
-      });
-    }
-  }
-  return imageFiles;
+// --- Utilities ---
+function createSeededRandom(seed) {
+  if (!seed) return Math.random;
+  let state = seed % 2147483647;
+  if (state <= 0) state += 2147483646;
+  return function() {
+    state = (state * 16807) % 2147483647;
+    return (state - 1) / 2147483646;
+  };
 }
 
-// Cache system
-let imageFilesCache = null;
-let lastCacheUpdate = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+function shuffleArray(array, seed = null) {
+  let currentIndex = array.length, randomIndex;
+  const newArray = [...array];
+  const randomFn = seed ? createSeededRandom(seed) : Math.random;
 
-// Media routes
+  while (currentIndex !== 0) {
+    randomIndex = Math.floor(randomFn() * currentIndex);
+    currentIndex--;
+    [newArray[currentIndex], newArray[randomIndex]] = [
+      newArray[randomIndex], newArray[currentIndex]];
+  }
+  return newArray;
+}
+
+// --- File Discovery ---
+const imageExts = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff)$/i;
+const videoExts = /\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i;
+const audioExts = /\.(mp3|wav|ogg|m4a|flac|aac)$/i;
+
+async function getImageFiles(dir) {
+  try {
+    const dirents = await fs.readdir(dir, { withFileTypes: true });
+    
+    // --- LIVE PHOTO DEDUPLICATION LOGIC ---
+    // 1. Identify all image base names in this specific directory first.
+    //    If we have 'vacation.heic', we store 'vacation' in the set.
+    const imageBaseNames = new Set();
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory() && imageExts.test(dirent.name)) {
+        // 'IMG_1234.HEIC' -> 'img_1234'
+        const baseName = path.parse(dirent.name).name.toLowerCase();
+        imageBaseNames.add(baseName);
+      }
+    }
+    // --------------------------------------
+
+    const filesPromises = dirents.map(async (dirent) => {
+      const fullPath = path.join(dir, dirent.name);
+      
+      try {
+        if (dirent.isDirectory()) {
+          return await getImageFiles(fullPath);
+        } else {
+          let type = null;
+          if (imageExts.test(dirent.name)) type = 'image';
+          else if (videoExts.test(dirent.name)) type = 'video';
+          else if (audioExts.test(dirent.name)) type = 'audio';
+
+          if (type) {
+            // Check for Live Photo duplicate
+            if (type === 'video') {
+              const baseName = path.parse(dirent.name).name.toLowerCase();
+              // If there is an image with the exact same name, assume this video is just the "Live" part
+              if (imageBaseNames.has(baseName)) {
+                return []; // SKIP this file
+              }
+            }
+
+            // Optimization: Get stats strictly for what we need
+            const stats = await fs.stat(fullPath);
+            const relativePath = path.relative(PHOTOS_DIR, fullPath).replace(/\\/g, '/');
+            const encodedUrlPath = relativePath.split('/').map(encodeURIComponent).join('/');
+            
+            return [{
+              id: Buffer.from(relativePath).toString('base64'),
+              url: `/media/${encodedUrlPath}`,
+              title: dirent.name,
+              created_utc: stats.birthtimeMs / 1000,
+              modified_utc: stats.mtimeMs / 1000,
+              author: 'Local Library',
+              subreddit: path.basename(path.dirname(fullPath)),
+              post_hint: type,
+            }];
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing file ${fullPath}:`, err.message);
+        return []; 
+      }
+      return []; 
+    });
+
+    const results = await Promise.all(filesPromises);
+    return results.flat();
+
+  } catch (error) {
+    console.error(`Error scanning directory ${dir}:`, error.message);
+    return []; 
+  }
+}
+
+async function updateFileCache() {
+  console.log('Updating file cache from disk...');
+  const start = Date.now();
+  globalFileCache = await getImageFiles(PHOTOS_DIR);
+  
+  // Optimization: Write cache to disk
+  try {
+    await fs.writeFile(CACHE_FILE, JSON.stringify(globalFileCache));
+    console.log(`Cache persisted to ${CACHE_FILE}`);
+  } catch (err) {
+    console.error('Failed to write cache file:', err);
+  }
+  
+  // Clear dependent caches
+  queryCache.clear(); 
+  
+  console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
+}
+
+// --- Load Cache on Start ---
+async function loadCacheFromDisk() {
+  try {
+    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    globalFileCache = JSON.parse(data);
+    console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
+  } catch (err) {
+    console.log('No persistent cache found, scanning now...');
+    await updateFileCache();
+  }
+}
+
+// --- Watcher ---
+let debounceTimer;
+function scheduleCacheUpdate() {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    console.log('File change detected. Updating cache...');
+    updateFileCache();
+  }, 5000); // 5 seconds debounce
+}
+
+function startWatcher() {
+  const watcher = chokidar.watch(PHOTOS_DIR, {
+    ignored: /(^|[\/\\])\../, // ignore dotfiles
+    persistent: true,
+    ignoreInitial: true, // Don't trigger on existing files at startup
+    depth: 99
+  });
+
+  watcher
+    .on('add', path => scheduleCacheUpdate())
+    .on('unlink', path => scheduleCacheUpdate());
+    // .on('change', ...) - usually we don't care if content changes, only if files are added/removed for the gallery list, 
+    // but if metadata changes it might be useful. Keeping it simple for now.
+    
+  console.log('File watcher started on ' + PHOTOS_DIR);
+}
+
+// --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 0;
-    const limit = parseInt(req.query.limit) || 25;
-    const skip = page * limit;
+    const limit = 50;
+    const page = parseInt(req.query.page) || 1;
+    const sort = req.query.sort || 'random';
+    const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();
+    
+    // Optimization: Generate a unique key for this view configuration
+    const cacheKey = `${sort}_${seed}`;
 
-    // Check if cache needs refresh
-    const now = Date.now();
-    if (!imageFilesCache || now - lastCacheUpdate > CACHE_TTL) {
-      imageFilesCache = await getImageFiles(PHOTOS_DIR);
-      lastCacheUpdate = now;
+    if (globalFileCache.length === 0) {
+      // Fallback if empty
+      await updateFileCache();
     }
 
-    // Paginate from the cache
-    const files = imageFilesCache
-      .sort((a, b) => b.created_utc - a.created_utc)
-      .slice(skip, skip + limit);
+    let processedFiles;
 
-    const response = {
+    // Optimization: Check Query Cache
+    if (queryCache.has(cacheKey)) {
+      processedFiles = queryCache.get(cacheKey);
+    } else {
+      // If not in cache, calculate and store it
+      // NOTE: This prevents re-sorting/re-shuffling on every page turn
+      processedFiles = [...globalFileCache];
+      
+      if (sort === 'random') {
+        processedFiles = shuffleArray(processedFiles, seed);
+      } else if (sort === 'date') {
+        processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+      } else if (sort === 'modified') {
+        processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
+      } else {
+        processedFiles.sort((a, b) => a.title.localeCompare(b.title));
+      }
+
+      // Store in LRU-like cache (simple cleanup strategy could be added)
+      if (queryCache.size > 100) queryCache.clear(); // Simple preventive clear
+      queryCache.set(cacheKey, processedFiles);
+    }
+
+    const startIndex = (page - 1) * limit;
+    const endIndex = startIndex + limit;
+    const files = processedFiles.slice(startIndex, endIndex);
+    const hasMore = endIndex < processedFiles.length;
+
+    res.json({
       data: {
         children: files,
-        after: skip + files.length < imageFilesCache.length ? 'more' : null
+        after: hasMore 
       }
-    };
-
-    res.json(response);
+    });
   } catch (error) {
-    console.error('Error fetching media:', error);
-    res.status(500).json({ error: 'Failed to fetch media' });
+    console.error("Error in /api/media route:", error);
+    res.status(500).json({ error: "Failed to retrieve media." });
   }
 });
 
-// Status endpoint
-app.get('/status', (req, res) => {
-  res.json({
-    status: 'Server is running',
-    timestamp: new Date().toISOString(),
-    totalFiles: imageFilesCache?.length || 0,
-    photosDirectory: PHOTOS_DIR
-  });
+app.get('/api/refresh', async (req, res) => {
+  try {
+    await updateFileCache();
+    res.json({ message: 'Cache updated successfully', count: globalFileCache.length });
+  } catch (error) {
+    console.error("Error in /api/refresh:", error);
+    res.status(500).json({ error: 'Failed to update cache' });
+  }
 });
 
+async function startServer() {
+  try {
+    await fs.access(PHOTOS_DIR);
+  } catch (error) {
+    console.log(`Media directory not found at ${PHOTOS_DIR}. Creating it.`);
+    await fs.mkdir(PHOTOS_DIR, { recursive: true });
+  }
 
-// --- Start Server ---
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend server running on http://0.0.0.0:${PORT}`);
+  // Optimization: Load from disk first
+  await loadCacheFromDisk();
+
+  // Start watching for changes
+  startWatcher();
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n==================================================`);
+    console.log(`Optimized Backend server running on http://0.0.0.0:${PORT}`);
+    console.log(`Serving media from: ${PHOTOS_DIR}`);
+    console.log(`==================================================\n`);
+  });
+}
+
+startServer().catch(error => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
 });
 
