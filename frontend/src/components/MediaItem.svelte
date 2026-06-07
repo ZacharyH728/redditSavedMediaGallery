@@ -1,5 +1,5 @@
 <script>
-  import { audioPreferences } from '../stores/preferencesStore.svelte.js';
+  import { audioPreferences, mediaPolicy } from '../stores/preferencesStore.svelte.js';
 
   let { post } = $props();
   const fullUrl = post.url;
@@ -66,6 +66,18 @@
       mediaElement.play().catch(() => {});
     }
   }
+
+  // iOS standalone fix: prime this video element as soon as the page receives its
+  // first touchstart (captured in App.svelte → mediaPolicy.unlocked = true).
+  // Without this, play() called from IntersectionObserver is rejected because the
+  // callback is async and not considered a user gesture by WebKit.
+  // Videos that mount after the first touch prime themselves immediately on mount.
+  $effect(() => {
+    if (!mediaElement || mediaType !== 'video' || !mediaPolicy.unlocked) return;
+    mediaElement.play()
+      .then(() => { if (!isVisible) mediaElement.pause(); })
+      .catch(() => {});
+  });
 
   function handleError() {
     hasError = true;

@@ -2,6 +2,7 @@
   import Header from './components/Header.svelte';
   import MediaGallery from './components/MediaGallery.svelte';
   import { galleryStore } from './stores/galleryStore.svelte.js';
+  import { mediaPolicy } from './stores/preferencesStore.svelte.js';
   import { onMount } from 'svelte';
 
   // This is the correct way to use $derived.
@@ -12,6 +13,15 @@
     if (galleryStore.posts.length === 0) {
       galleryStore.fetchMedia();
     }
+
+    // In iOS standalone (home screen web app) mode, video.play() is blocked
+    // unless called from within a user gesture. Capture the first touchstart
+    // so that MediaItem components can prime themselves and become playable.
+    function unlockMedia() {
+      mediaPolicy.unlocked = true;
+    }
+    document.addEventListener('touchstart', unlockMedia, { once: true, capture: true });
+    return () => document.removeEventListener('touchstart', unlockMedia, true);
   });
 
   function handleReshuffle() {
