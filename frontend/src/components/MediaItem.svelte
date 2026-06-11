@@ -13,7 +13,8 @@
   }
 
   const mediaType = getMediaType(post.title || '', post.post_hint);
-  
+  const isAnimatedImage = mediaType === 'image' && /\.gif$/i.test(post.title || post.url || '');
+
   let hasError = $state(false);
   let showTitle = $state(false);
   let showControls = $state(false);
@@ -39,12 +40,42 @@
 
   // Track viewport visibility so canplay handler knows whether to start playback
   let isVisible = false;
+  // Controls whether the video src is attached. Off-screen videos detach src
+  // to release decoder/connection slots — browsers cap simultaneous video
+  // elements, and without this, scrolling far enough makes new videos fail to load.
+  let srcAttached = $state(false);
 
-  // Intersection Observer for Auto-Play/Pause
+  // Near-viewport observer: attach/detach src to free decoder + buffer + connection slots.
+  // Also applies to animated GIFs — their decoded frame buffer is large and the animation
+  // loop keeps running off-screen, so detaching src reclaims memory and stops the loop.
+  $effect(() => {
+    if (!mediaElement) return;
+    if (mediaType !== 'video' && !isAnimatedImage) return;
+
+    const nearObserver = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (entry.isIntersecting) {
+        srcAttached = true;
+      } else {
+        srcAttached = false;
+        if (mediaType === 'video') {
+          mediaElement.pause();
+          mediaElement.removeAttribute('src');
+          mediaElement.load();
+        }
+        // For <img>, Svelte's reactive src={...} re-render handles detach.
+      }
+    }, { rootMargin: '1500px' });
+
+    nearObserver.observe(mediaElement);
+    return () => nearObserver.disconnect();
+  });
+
+  // In-viewport observer: play/pause based on actual visibility.
   $effect(() => {
     if (!mediaElement || mediaType !== 'video') return;
 
-    const observer = new IntersectionObserver((entries) => {
+    const playObserver = new IntersectionObserver((entries) => {
       const entry = entries[0];
       isVisible = entry.isIntersecting;
       if (entry.isIntersecting) {
@@ -54,8 +85,8 @@
       }
     }, { threshold: 0.25 });
 
-    observer.observe(mediaElement);
-    return () => observer.disconnect();
+    playObserver.observe(mediaElement);
+    return () => playObserver.disconnect();
   });
 
   // Retry play when buffered data arrives — fixes videos stuck in loading state.
@@ -102,11 +133,10 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <video
         bind:this={mediaElement}
-        src={fullUrl}
+        src={srcAttached ? fullUrl : undefined}
         controls={showControls}
         class="centered-media"
         preload="metadata"
-        autoplay
         loop
         playsinline
         muted={audioPreferences.muted}
@@ -123,11 +153,20 @@
         class="centered-media audio-player"
         onerror={handleError}
       ></audio>
+    {:else if isAnimatedImage}
+      <img
+        bind:this={mediaElement}
+        src={srcAttached ? fullUrl : undefined}
+        alt={post.title}
+        class="centered-media"
+        onerror={handleError}
+      />
     {:else}
-      <img 
-        src={fullUrl} 
-        alt={post.title} 
-        class="centered-media" 
+      <img
+        src={fullUrl}
+        alt={post.title}
+        class="centered-media"
+        loading="lazy"
         onerror={handleError}
       />
     {/if}
