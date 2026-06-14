@@ -215,7 +215,7 @@ app.get('/api/media', async (req, res) => {
       if (sort === 'random') {
         processedFiles = shuffleArray(processedFiles, seed);
       } else if (sort === 'date') {
-        processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+        processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else if (sort === 'modified') {
         processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else {
