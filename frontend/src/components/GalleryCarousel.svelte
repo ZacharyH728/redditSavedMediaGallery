@@ -1,72 +1,63 @@
 <script>
   let { post } = $props();
 
-  let trackEl = $state(null);
   let currentIndex = $state(0);
   let showTitle = $state(false);
-  // Explicit pixel width measured via ResizeObserver — avoids the iOS Safari bug
-  // where percentage widths inside overflow-x containers resolve to scroll-content
-  // width instead of the visible container width.
-  let slideWidthPx = $state(0);
-
   const totalItems = post.items?.length ?? 0;
 
-  $effect(() => {
-    if (!trackEl) return;
-    const ro = new ResizeObserver(entries => {
-      slideWidthPx = entries[0].contentRect.width;
-    });
-    ro.observe(trackEl);
-    return () => ro.disconnect();
-  });
-
-  let scrollTimer = null;
-  function handleScroll() {
-    clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(() => {
-      if (!trackEl || slideWidthPx === 0) return;
-      currentIndex = Math.max(0, Math.min(Math.round(trackEl.scrollLeft / slideWidthPx), totalItems - 1));
-    }, 50);
-  }
-
   function goTo(index) {
-    if (!trackEl || index < 0 || index >= totalItems) return;
+    if (index < 0 || index >= totalItems) return;
     currentIndex = index;
-    trackEl.scrollTo({ left: index * slideWidthPx, behavior: 'smooth' });
   }
-
   function prev(e) { e.stopPropagation(); goTo(currentIndex - 1); }
   function next(e) { e.stopPropagation(); goTo(currentIndex + 1); }
   function jumpTo(e, i) { e.stopPropagation(); goTo(i); }
 
-  // Distinguish a tap from a swipe so the title only toggles on taps.
-  // iOS fires a click event after a scroll gesture ends, which would otherwise
-  // toggle the title every time the user swipes between slides.
-  let scrollLeftAtPointerDown = 0;
-  function handlePointerDown() {
-    scrollLeftAtPointerDown = trackEl?.scrollLeft ?? 0;
+  // Touch swipe — avoids synthetic click issues on iOS by calling preventDefault on touchend
+  let touchStartX = 0;
+  function handleTouchStart(e) {
+    touchStartX = e.touches[0].clientX;
   }
-  function handleClick() {
-    const delta = Math.abs((trackEl?.scrollLeft ?? 0) - scrollLeftAtPointerDown);
-    if (delta < 5) showTitle = !showTitle;
+  function handleTouchEnd(e) {
+    e.preventDefault(); // suppresses the synthetic click that would follow on iOS
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 40) {
+      goTo(dx < 0 ? currentIndex + 1 : currentIndex - 1);
+    } else if (Math.abs(dx) < 5) {
+      showTitle = !showTitle;
+    }
   }
 
+  // Desktop: plain click toggles title (touch path calls preventDefault so this won't double-fire)
+  function handleClick() { showTitle = !showTitle; }
+
   let imageErrors = $state({});
-  function handleImageError(index) {
-    imageErrors = { ...imageErrors, [index]: true };
-  }
+  function handleImageError(i) { imageErrors = { ...imageErrors, [i]: true }; }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="gallery-item" onpointerdown={handlePointerDown} onclick={handleClick}>
-  <div class="carousel-wrapper">
-    <div class="carousel-track" bind:this={trackEl} onscroll={handleScroll}>
+<div class="gallery-item" onclick={handleClick}>
+  <div class="carousel-outer">
+    <!--
+      Transform-based positioning — no overflow-x scroll.
+      .carousel-outer clips at its width; the track translates left to reveal each slide.
+      100% widths on slides resolve to the track's declared width (= outer width),
+      which is unambiguous on all browsers including iOS Safari.
+    -->
+    <div
+      class="carousel-track"
+      style="transform: translateX(-{currentIndex * 100}%)"
+      ontouchstart={handleTouchStart}
+      ontouchend={handleTouchEnd}
+    >
       {#each post.items ?? [] as item, i}
-        <div class="slide" style="width: {slideWidthPx}px; min-width: {slideWidthPx}px">
+        <div class="slide">
           {#if imageErrors[i]}
             <div class="slide-error">
               <span>⚠️</span>
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <a href={item.url} target="_blank" rel="noopener noreferrer" onclick={(e) => e.stopPropagation()}>Open file</a>
             </div>
           {:else if item.post_hint === 'video'}
@@ -130,19 +121,21 @@
     overflow: hidden;
     border: 1px solid #30363d;
   }
-  .carousel-wrapper { position: relative; width: 100%; overflow: hidden; }
+  .carousel-outer {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+  }
   .carousel-track {
     display: flex;
-    overflow-x: scroll;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
+    width: 100%;
+    transition: transform 0.3s ease;
+    will-change: transform;
+    touch-action: pan-y;
   }
-  .carousel-track::-webkit-scrollbar { display: none; }
   .slide {
+    width: 100%;
     flex-shrink: 0;
-    scroll-snap-align: start;
     background-color: #161b22;
     display: flex;
     justify-content: center;
@@ -192,13 +185,7 @@
     transition: background 0.15s;
   }
   .dot.active { background: white; }
-  .counter {
-    background: rgba(0, 0, 0, 0.6);
-    color: white;
-    padding: 3px 10px;
-    border-radius: 12px;
-    font-size: 13px;
-  }
+  .counter { background: rgba(0, 0, 0, 0.6); color: white; padding: 3px 10px; border-radius: 12px; font-size: 13px; }
   .gallery-info { padding: 15px; display: flex; justify-content: space-between; align-items: center; }
   .post-title { font-size: 16px; font-weight: 500; color: #c9d1d9; margin: 0; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .item-count { font-size: 13px; color: #8b949e; white-space: nowrap; margin-left: 12px; }
