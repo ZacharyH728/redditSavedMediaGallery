@@ -4,40 +4,72 @@
   let trackEl = $state(null);
   let currentIndex = $state(0);
   let showTitle = $state(false);
+  // Explicit pixel width measured via ResizeObserver — avoids the iOS Safari bug
+  // where percentage widths inside overflow-x containers resolve to scroll-content
+  // width instead of the visible container width.
+  let slideWidthPx = $state(0);
 
-  const totalItems = post.items.length;
+  const totalItems = post.items?.length ?? 0;
+
+  $effect(() => {
+    if (!trackEl) return;
+    const ro = new ResizeObserver(entries => {
+      slideWidthPx = entries[0].contentRect.width;
+    });
+    ro.observe(trackEl);
+    return () => ro.disconnect();
+  });
 
   let scrollTimer = null;
   function handleScroll() {
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => {
-      if (!trackEl) return;
-      const slideWidth = trackEl.offsetWidth;
-      if (slideWidth === 0) return;
-      currentIndex = Math.max(0, Math.min(Math.round(trackEl.scrollLeft / slideWidth), totalItems - 1));
+      if (!trackEl || slideWidthPx === 0) return;
+      currentIndex = Math.max(0, Math.min(Math.round(trackEl.scrollLeft / slideWidthPx), totalItems - 1));
     }, 50);
   }
 
   function goTo(index) {
     if (!trackEl || index < 0 || index >= totalItems) return;
     currentIndex = index;
-    trackEl.scrollTo({ left: index * trackEl.offsetWidth, behavior: 'smooth' });
+    trackEl.scrollTo({ left: index * slideWidthPx, behavior: 'smooth' });
   }
 
   function prev(e) { e.stopPropagation(); goTo(currentIndex - 1); }
   function next(e) { e.stopPropagation(); goTo(currentIndex + 1); }
   function jumpTo(e, i) { e.stopPropagation(); goTo(i); }
-  function toggleTitle() { showTitle = !showTitle; }
+
+  // Distinguish a tap from a swipe so the title only toggles on taps.
+  // iOS fires a click event after a scroll gesture ends, which would otherwise
+  // toggle the title every time the user swipes between slides.
+  let scrollLeftAtPointerDown = 0;
+  function handlePointerDown() {
+    scrollLeftAtPointerDown = trackEl?.scrollLeft ?? 0;
+  }
+  function handleClick() {
+    const delta = Math.abs((trackEl?.scrollLeft ?? 0) - scrollLeftAtPointerDown);
+    if (delta < 5) showTitle = !showTitle;
+  }
+
+  let imageErrors = $state({});
+  function handleImageError(index) {
+    imageErrors = { ...imageErrors, [index]: true };
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="gallery-item" onclick={toggleTitle}>
+<div class="gallery-item" onpointerdown={handlePointerDown} onclick={handleClick}>
   <div class="carousel-wrapper">
     <div class="carousel-track" bind:this={trackEl} onscroll={handleScroll}>
-      {#each post.items as item}
-        <div class="slide">
-          {#if item.post_hint === 'video'}
+      {#each post.items ?? [] as item, i}
+        <div class="slide" style="width: {slideWidthPx}px; min-width: {slideWidthPx}px">
+          {#if imageErrors[i]}
+            <div class="slide-error">
+              <span>⚠️</span>
+              <a href={item.url} target="_blank" rel="noopener noreferrer" onclick={(e) => e.stopPropagation()}>Open file</a>
+            </div>
+          {:else if item.post_hint === 'video'}
             <!-- svelte-ignore a11y_media_has_caption -->
             <video
               src={item.url}
@@ -47,12 +79,14 @@
               playsinline
               muted
               controls
+              onerror={() => handleImageError(i)}
             ></video>
           {:else}
             <img
               src={item.url}
-              alt={item.title || ''}
+              alt=""
               class="slide-media"
+              onerror={() => handleImageError(i)}
             />
           {/if}
         </div>
@@ -70,7 +104,7 @@
       <div class="indicator">
         {#if totalItems <= 8}
           <div class="dots">
-            {#each post.items as _, i}
+            {#each post.items ?? [] as _, i}
               <button class="dot" class:active={i === currentIndex} onclick={(e) => jumpTo(e, i)}></button>
             {/each}
           </div>
@@ -104,14 +138,9 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
-    width: 100%;
   }
   .carousel-track::-webkit-scrollbar { display: none; }
   .slide {
-    /* min-width instead of flex-basis % avoids an iOS Safari bug where
-       flex: 0 0 100% inside an overflow container resolves incorrectly */
-    min-width: 100%;
-    width: 100%;
     flex-shrink: 0;
     scroll-snap-align: start;
     background-color: #161b22;
@@ -121,6 +150,8 @@
     min-height: 200px;
   }
   .slide-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }
+  .slide-error { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #8b949e; font-size: 14px; padding: 20px; }
+  .slide-error a { color: #58a6ff; text-decoration: none; border: 1px solid #30363d; padding: 4px 10px; border-radius: 6px; }
   .nav-btn {
     position: absolute;
     top: 50%;
