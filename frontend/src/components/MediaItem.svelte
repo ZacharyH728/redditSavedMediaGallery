@@ -18,9 +18,11 @@
   let hasError = $state(false);
   let showTitle = $state(false);
   let showControls = $state(false);
-  
-  // Optimization: Reference to the video DOM element
+
   let mediaElement = $state(null);
+  let mediaContentElement = $state(null);
+  // Height reserved when src is detached, cleared once media reloads
+  let reservedHeight = $state(null);
 
   // Sync with global mute state
   $effect(() => {
@@ -55,8 +57,11 @@
     const nearObserver = new IntersectionObserver((entries) => {
       const entry = entries[0];
       if (entry.isIntersecting) {
+        reservedHeight = null;
         srcAttached = true;
       } else {
+        // Snapshot height before detaching so the container doesn't collapse
+        reservedHeight = mediaContentElement?.offsetHeight ?? null;
         srcAttached = false;
         if (mediaType === 'video') {
           mediaElement.pause();
@@ -118,7 +123,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="media-item" onclick={toggleTitle}>
-  <div class="media-content">
+  <div class="media-content" bind:this={mediaContentElement} style={reservedHeight ? `min-height: ${reservedHeight}px` : ''}>
     {#if hasError}
       <div class="error-fallback">
         <span class="error-icon">⚠️</span>
@@ -184,8 +189,8 @@
     border-radius: 6px; 
     overflow: hidden; 
     border: 1px solid #30363d;
-    content-visibility: auto; 
-    contain-intrinsic-size: 500px; 
+    content-visibility: auto;
+    contain-intrinsic-size: auto 500px;
   }
   .media-content { background-color: #161b22; display: flex; justify-content: center; align-items: center; min-height: 200px; }
   .centered-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }
