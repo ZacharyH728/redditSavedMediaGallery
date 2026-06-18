@@ -1,5 +1,6 @@
 <script>
   import MediaItem from './MediaItem.svelte';
+  import GalleryCarousel from './GalleryCarousel.svelte';
   import LoadingSpinner from './LoadingSpinner.svelte';
   import { galleryStore } from '../stores/galleryStore.svelte.js';
 
@@ -41,7 +42,11 @@
 {:else}
   <div class="media-feed">
     {#each galleryStore.posts as post (post.id)}
-      <MediaItem {post} />
+      {#if post.post_hint === 'gallery'}
+        <GalleryCarousel {post} />
+      {:else}
+        <MediaItem {post} />
+      {/if}
     {/each}
 
     {#if galleryStore.hasMorePosts}

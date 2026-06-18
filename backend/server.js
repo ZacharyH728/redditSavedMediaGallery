@@ -128,10 +128,50 @@ async function getImageFiles(dir) {
   }
 }
 
+function groupGalleryItems(files) {
+  const groups = new Map();
+  const singles = [];
+
+  for (const file of files) {
+    const match = file.title.match(/^(.+)_(\d+)(\.[^.]+)$/);
+    if (!match) { singles.push(file); continue; }
+    const [, baseName, num, ext] = match;
+    const dir = file.url.substring(0, file.url.lastIndexOf('/'));
+    const key = `${dir}/${baseName}${ext}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ file, num: parseInt(num, 10) });
+  }
+
+  const result = [...singles];
+  for (const [, items] of groups) {
+    if (items.length === 1) {
+      result.push(items[0].file);
+    } else {
+      items.sort((a, b) => a.num - b.num);
+      const first = items[0].file;
+      const baseName = first.title.match(/^(.+)_\d+(\.[^.]+)$/)?.[1] ?? first.title;
+      result.push({
+        id: `gallery_${first.id}`,
+        title: baseName,
+        post_hint: 'gallery',
+        subreddit: first.subreddit,
+        created_utc: first.created_utc,
+        modified_utc: first.modified_utc,
+        items: items.map(({ file }) => ({
+          url: file.url,
+          title: file.title,
+          post_hint: file.post_hint,
+        })),
+      });
+    }
+  }
+  return result;
+}
+
 async function updateFileCache() {
   console.log('Updating file cache from disk...');
   const start = Date.now();
-  globalFileCache = await getImageFiles(PHOTOS_DIR);
+  globalFileCache = groupGalleryItems(await getImageFiles(PHOTOS_DIR));
   
   // Optimization: Write cache to disk
   try {
