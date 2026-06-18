@@ -148,12 +148,11 @@ function groupGalleryItems(files) {
   for (const [, items] of groups) {
     items.sort((a, b) => a.num - b.num);
     const nums = items.map(i => i.num);
-    // Only treat as a gallery if numbers are consecutive starting from 0 or 1.
-    // This prevents standalone files like name_3.jpg or coincidental collisions
-    // (e.g. two unrelated posts both ending in _1/_2) from being falsely grouped.
-    const startsCorrectly = nums[0] === 0 || nums[0] === 1;
+    // Require 2+ items with no gaps. Starting number is unconstrained so
+    // galleries numbered _0…_N and _2…_N both work. A lone _3.jpg (1 item)
+    // or two files with a gap (_1, _3) are left as regular files.
     const isConsecutive = nums.every((n, i) => i === 0 || n === nums[i - 1] + 1);
-    if (items.length < 2 || !startsCorrectly || !isConsecutive) {
+    if (items.length < 2 || !isConsecutive) {
       items.forEach(({ file }) => result.push(file));
     } else {
       const first = items[0].file;

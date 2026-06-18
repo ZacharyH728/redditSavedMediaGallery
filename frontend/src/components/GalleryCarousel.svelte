@@ -98,18 +98,23 @@
     content-visibility: auto;
     contain-intrinsic-size: auto 500px;
   }
-  .carousel-wrapper { position: relative; }
+  .carousel-wrapper { position: relative; width: 100%; overflow: hidden; }
   .carousel-track {
     display: flex;
-    overflow-x: auto;
+    overflow-x: scroll;
     scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
+    width: 100%;
   }
   .carousel-track::-webkit-scrollbar { display: none; }
   .slide {
-    flex: 0 0 100%;
+    /* min-width instead of flex-basis % avoids an iOS Safari bug where
+       flex: 0 0 100% inside an overflow container resolves incorrectly */
+    min-width: 100%;
+    width: 100%;
+    flex-shrink: 0;
     scroll-snap-align: start;
     background-color: #161b22;
     display: flex;
