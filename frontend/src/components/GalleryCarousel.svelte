@@ -53,7 +53,6 @@
               src={item.url}
               alt={item.title || ''}
               class="slide-media"
-              loading="lazy"
             />
           {/if}
         </div>
@@ -105,6 +104,7 @@
     overflow-x: auto;
     scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     scrollbar-width: none;
   }
   .carousel-track::-webkit-scrollbar { display: none; }

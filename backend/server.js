@@ -133,6 +133,8 @@ function groupGalleryItems(files) {
   const singles = [];
 
   for (const file of files) {
+    // Pass already-grouped gallery items through unchanged (cache idempotency)
+    if (file.post_hint === 'gallery') { singles.push(file); continue; }
     const match = file.title.match(/^(.+)_(\d+)(\.[^.]+)$/);
     if (!match) { singles.push(file); continue; }
     const [, baseName, num, ext] = match;
@@ -144,10 +146,16 @@ function groupGalleryItems(files) {
 
   const result = [...singles];
   for (const [, items] of groups) {
-    if (items.length === 1) {
-      result.push(items[0].file);
+    items.sort((a, b) => a.num - b.num);
+    const nums = items.map(i => i.num);
+    // Only treat as a gallery if numbers are consecutive starting from 0 or 1.
+    // This prevents standalone files like name_3.jpg or coincidental collisions
+    // (e.g. two unrelated posts both ending in _1/_2) from being falsely grouped.
+    const startsCorrectly = nums[0] === 0 || nums[0] === 1;
+    const isConsecutive = nums.every((n, i) => i === 0 || n === nums[i - 1] + 1);
+    if (items.length < 2 || !startsCorrectly || !isConsecutive) {
+      items.forEach(({ file }) => result.push(file));
     } else {
-      items.sort((a, b) => a.num - b.num);
       const first = items[0].file;
       const baseName = first.title.match(/^(.+)_\d+(\.[^.]+)$/)?.[1] ?? first.title;
       result.push({
@@ -191,7 +199,7 @@ async function updateFileCache() {
 async function loadCacheFromDisk() {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
-    globalFileCache = JSON.parse(data);
+    globalFileCache = groupGalleryItems(JSON.parse(data));
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
   } catch (err) {
     console.log('No persistent cache found, scanning now...');
