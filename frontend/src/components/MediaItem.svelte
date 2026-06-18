@@ -189,8 +189,6 @@
     border-radius: 6px; 
     overflow: hidden; 
     border: 1px solid #30363d;
-    content-visibility: auto;
-    contain-intrinsic-size: auto 500px;
   }
   .media-content { background-color: #161b22; display: flex; justify-content: center; align-items: center; min-height: 200px; }
   .centered-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }

@@ -95,8 +95,6 @@
     border-radius: 6px;
     overflow: hidden;
     border: 1px solid #30363d;
-    content-visibility: auto;
-    contain-intrinsic-size: auto 500px;
   }
   .carousel-wrapper { position: relative; width: 100%; overflow: hidden; }
   .carousel-track {
