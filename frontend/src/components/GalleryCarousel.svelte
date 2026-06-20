@@ -1,9 +1,66 @@
 <script>
   let { post } = $props();
 
+  let containerEl = $state(null);
   let currentIndex = $state(0);
   let showTitle = $state(false);
+  let srcAttached = $state(false);
+  let carouselInView = $state(false);
   const totalItems = post.items?.length ?? 0;
+
+  // Plain (non-reactive) map of video DOM elements — used only for imperative
+  // pause/load calls. A Svelte action populates this on element mount.
+  const videoRefs = {};
+  function videoRef(el, index) {
+    videoRefs[index] = el;
+    return { destroy() { delete videoRefs[index]; } };
+  }
+
+  // Near-viewport observer: attach/detach video sources to free decoder + buffer +
+  // connection slots. Mirrors the same pattern used in MediaItem for single videos.
+  $effect(() => {
+    if (!containerEl) return;
+    const nearObserver = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        srcAttached = true;
+      } else {
+        srcAttached = false;
+        // Force immediate release — Svelte's reactive src removal lands next tick,
+        // so we also call pause/load directly to free the decoder slot right now.
+        Object.values(videoRefs).forEach(el => {
+          if (!el) return;
+          el.pause();
+          el.removeAttribute('src');
+          el.load();
+        });
+      }
+    }, { rootMargin: '1500px' });
+    nearObserver.observe(containerEl);
+    return () => nearObserver.disconnect();
+  });
+
+  // In-viewport observer: play/pause the active slide's video.
+  $effect(() => {
+    if (!containerEl) return;
+    const playObserver = new IntersectionObserver((entries) => {
+      carouselInView = entries[0].isIntersecting;
+    }, { threshold: 0.25 });
+    playObserver.observe(containerEl);
+    return () => playObserver.disconnect();
+  });
+
+  // React to visibility + slide changes: pause all, play only the current slide if visible.
+  $effect(() => {
+    const shouldPlay = carouselInView && srcAttached;
+    Object.entries(videoRefs).forEach(([idx, el]) => {
+      if (!el) return;
+      if (parseInt(idx) === currentIndex && shouldPlay) {
+        el.play().catch(() => {});
+      } else {
+        el.pause();
+      }
+    });
+  });
 
   function goTo(index) {
     if (index < 0 || index >= totalItems) return;
@@ -13,13 +70,10 @@
   function next(e) { e.stopPropagation(); goTo(currentIndex + 1); }
   function jumpTo(e, i) { e.stopPropagation(); goTo(i); }
 
-  // Touch swipe — avoids synthetic click issues on iOS by calling preventDefault on touchend
   let touchStartX = 0;
-  function handleTouchStart(e) {
-    touchStartX = e.touches[0].clientX;
-  }
+  function handleTouchStart(e) { touchStartX = e.touches[0].clientX; }
   function handleTouchEnd(e) {
-    e.preventDefault(); // suppresses the synthetic click that would follow on iOS
+    e.preventDefault();
     const dx = e.changedTouches[0].clientX - touchStartX;
     if (Math.abs(dx) > 40) {
       goTo(dx < 0 ? currentIndex + 1 : currentIndex - 1);
@@ -28,7 +82,6 @@
     }
   }
 
-  // Desktop: plain click toggles title (touch path calls preventDefault so this won't double-fire)
   function handleClick() { showTitle = !showTitle; }
 
   let imageErrors = $state({});
@@ -37,7 +90,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="gallery-item" onclick={handleClick}>
+<div class="gallery-item" bind:this={containerEl} onclick={handleClick}>
   <div class="carousel-outer">
     <!--
       Transform-based positioning — no overflow-x scroll.
@@ -63,7 +116,8 @@
           {:else if item.post_hint === 'video'}
             <!-- svelte-ignore a11y_media_has_caption -->
             <video
-              src={item.url}
+              use:videoRef={i}
+              src={srcAttached ? item.url : undefined}
               class="slide-media"
               preload="metadata"
               loop
@@ -130,7 +184,6 @@
     display: flex;
     width: 100%;
     transition: transform 0.3s ease;
-    will-change: transform;
     touch-action: pan-y;
   }
   .slide {
