@@ -19,6 +19,7 @@
   let showTitle = $state(false);
   let showControls = $state(false);
 
+  let itemElement = $state(null);
   let mediaElement = $state(null);
   let mediaContentElement = $state(null);
   // Height reserved when src is detached, cleared once media reloads
@@ -50,8 +51,9 @@
   // Near-viewport observer: attach/detach src to free decoder + buffer + connection slots.
   // Also applies to animated GIFs — their decoded frame buffer is large and the animation
   // loop keeps running off-screen, so detaching src reclaims memory and stops the loop.
+  // Observes the outer item element so it works correctly with content-visibility: auto.
   $effect(() => {
-    if (!mediaElement) return;
+    if (!itemElement) return;
     if (mediaType !== 'video' && !isAnimatedImage) return;
 
     const nearObserver = new IntersectionObserver((entries) => {
@@ -64,33 +66,34 @@
         reservedHeight = mediaContentElement?.offsetHeight ?? null;
         srcAttached = false;
         if (mediaType === 'video') {
-          mediaElement.pause();
-          mediaElement.removeAttribute('src');
-          mediaElement.load();
+          mediaElement?.pause();
+          mediaElement?.removeAttribute('src');
+          mediaElement?.load();
         }
         // For <img>, Svelte's reactive src={...} re-render handles detach.
       }
-    }, { rootMargin: '1500px' });
+    }, { rootMargin: '800px' });
 
-    nearObserver.observe(mediaElement);
+    nearObserver.observe(itemElement);
     return () => nearObserver.disconnect();
   });
 
   // In-viewport observer: play/pause based on actual visibility.
+  // Observes the outer item element so it works correctly with content-visibility: auto.
   $effect(() => {
-    if (!mediaElement || mediaType !== 'video') return;
+    if (!itemElement || mediaType !== 'video') return;
 
     const playObserver = new IntersectionObserver((entries) => {
       const entry = entries[0];
       isVisible = entry.isIntersecting;
       if (entry.isIntersecting) {
-        mediaElement.play().catch(() => {});
+        mediaElement?.play().catch(() => {});
       } else {
-        mediaElement.pause();
+        mediaElement?.pause();
       }
     }, { threshold: 0.25 });
 
-    playObserver.observe(mediaElement);
+    playObserver.observe(itemElement);
     return () => playObserver.disconnect();
   });
 
@@ -122,7 +125,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="media-item" onclick={toggleTitle}>
+<div class="media-item" bind:this={itemElement} onclick={toggleTitle}>
   <div class="media-content" bind:this={mediaContentElement} style={reservedHeight ? `min-height: ${reservedHeight}px` : ''}>
     {#if hasError}
       <div class="error-fallback">
@@ -184,11 +187,13 @@
 </div>
 
 <style>
-  .media-item { 
-    background-color: #0d1117; 
-    border-radius: 6px; 
-    overflow: hidden; 
+  .media-item {
+    background-color: #0d1117;
+    border-radius: 6px;
+    overflow: hidden;
     border: 1px solid #30363d;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 400px;
   }
   .media-content { background-color: #161b22; display: flex; justify-content: center; align-items: center; min-height: 200px; }
   .centered-media { max-width: 100%; max-height: 80vh; width: 100%; height: auto; object-fit: contain; display: block; }

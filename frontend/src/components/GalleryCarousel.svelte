@@ -34,7 +34,7 @@
           el.load();
         });
       }
-    }, { rootMargin: '1500px' });
+    }, { rootMargin: '800px' });
     nearObserver.observe(containerEl);
     return () => nearObserver.disconnect();
   });
@@ -86,6 +86,17 @@
 
   let imageErrors = $state({});
   function handleImageError(i) { imageErrors = { ...imageErrors, [i]: true }; }
+
+  // Track which slides have had their src attached. Once loaded, a slide stays loaded
+  // so navigating back doesn't trigger a re-fetch. Only loads current ±1 slides.
+  let slideLoaded = $state(new Array(totalItems).fill(false));
+  $effect(() => {
+    if (!srcAttached) return;
+    for (let offset = -1; offset <= 1; offset++) {
+      const idx = currentIndex + offset;
+      if (idx >= 0 && idx < totalItems) slideLoaded[idx] = true;
+    }
+  });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -117,7 +128,7 @@
             <!-- svelte-ignore a11y_media_has_caption -->
             <video
               use:videoRef={i}
-              src={srcAttached ? item.url : undefined}
+              src={srcAttached && slideLoaded[i] ? item.url : undefined}
               class="slide-media"
               preload="metadata"
               loop
@@ -128,9 +139,10 @@
             ></video>
           {:else}
             <img
-              src={item.url}
+              src={srcAttached && slideLoaded[i] ? item.url : undefined}
               alt=""
               class="slide-media"
+              decoding="async"
               onerror={() => handleImageError(i)}
             />
           {/if}
@@ -174,6 +186,8 @@
     border-radius: 6px;
     overflow: hidden;
     border: 1px solid #30363d;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 400px;
   }
   .carousel-outer {
     position: relative;
@@ -185,6 +199,7 @@
     width: 100%;
     transition: transform 0.3s ease;
     touch-action: pan-y;
+    will-change: transform;
   }
   .slide {
     width: 100%;
