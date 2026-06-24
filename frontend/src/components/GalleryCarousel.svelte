@@ -1,4 +1,6 @@
 <script>
+  import { registerMedia, unregisterMedia, PLAY_THRESHOLDS } from '../stores/videoPlayManager.js';
+
   let { post } = $props();
 
   let containerEl = $state(null);
@@ -39,14 +41,23 @@
     return () => nearObserver.disconnect();
   });
 
-  // In-viewport observer: play/pause the active slide's video.
+  // Play manager registration: coordinates with all other media so only the
+  // most-visible item plays. Sets carouselInView which the slide-play effect reads.
   $effect(() => {
     if (!containerEl) return;
-    const playObserver = new IntersectionObserver((entries) => {
-      carouselInView = entries[0].isIntersecting;
-    }, { threshold: 0.25 });
-    playObserver.observe(containerEl);
-    return () => playObserver.disconnect();
+    const updateRatio = registerMedia(containerEl, {
+      play: () => { carouselInView = true; },
+      pause: () => { carouselInView = false; },
+    });
+    const observer = new IntersectionObserver(
+      (entries) => updateRatio(entries[0].intersectionRatio),
+      { threshold: PLAY_THRESHOLDS }
+    );
+    observer.observe(containerEl);
+    return () => {
+      observer.disconnect();
+      unregisterMedia(containerEl);
+    };
   });
 
   // React to visibility + slide changes: pause all, play only the current slide if visible.

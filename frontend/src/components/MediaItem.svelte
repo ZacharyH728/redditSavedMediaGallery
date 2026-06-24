@@ -1,5 +1,6 @@
 <script>
   import { audioPreferences } from '../stores/preferencesStore.svelte.js';
+  import { registerMedia, unregisterMedia, PLAY_THRESHOLDS } from '../stores/videoPlayManager.js';
 
   let { post } = $props();
   const fullUrl = post.url;
@@ -78,23 +79,32 @@
     return () => nearObserver.disconnect();
   });
 
-  // In-viewport observer: play/pause based on actual visibility.
-  // Observes the outer item element so it works correctly with content-visibility: auto.
+  // Play manager registration: only the most-visible media element plays at any time.
+  // This prevents multiple videos from playing simultaneously when scrolling quickly
+  // causes two items to cross the visibility threshold at the same moment.
   $effect(() => {
     if (!itemElement || mediaType !== 'video') return;
 
-    const playObserver = new IntersectionObserver((entries) => {
-      const entry = entries[0];
-      isVisible = entry.isIntersecting;
-      if (entry.isIntersecting) {
+    const updateRatio = registerMedia(itemElement, {
+      play: () => {
+        isVisible = true;
         mediaElement?.play().catch(() => {});
-      } else {
+      },
+      pause: () => {
+        isVisible = false;
         mediaElement?.pause();
-      }
-    }, { threshold: 0.25 });
+      },
+    });
 
-    playObserver.observe(itemElement);
-    return () => playObserver.disconnect();
+    const observer = new IntersectionObserver(
+      (entries) => updateRatio(entries[0].intersectionRatio),
+      { threshold: PLAY_THRESHOLDS }
+    );
+    observer.observe(itemElement);
+    return () => {
+      observer.disconnect();
+      unregisterMedia(itemElement);
+    };
   });
 
   // Retry play when buffered data arrives — fixes videos stuck in loading state.
