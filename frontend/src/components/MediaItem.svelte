@@ -1,9 +1,11 @@
 <script>
   import { audioPreferences } from '../stores/preferencesStore.svelte.js';
   import { registerMedia, unregisterMedia, PLAY_THRESHOLDS } from '../stores/videoPlayManager.js';
+  import { config } from '../stores/config.js';
 
   let { post } = $props();
   const fullUrl = post.url;
+  const thumbnailUrl = post.thumbnail_url ? `${config.apiUrl}${post.thumbnail_url}` : null;
 
   function getMediaType(filename, hint) {
     if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
@@ -152,6 +154,7 @@
       <video
         bind:this={mediaElement}
         src={srcAttached ? fullUrl : undefined}
+        poster={thumbnailUrl ?? undefined}
         controls={showControls}
         class="centered-media"
         preload="metadata"
@@ -181,11 +184,18 @@
       />
     {:else}
       <img
-        src={fullUrl}
+        src={thumbnailUrl ?? fullUrl}
         alt={post.title}
         class="centered-media"
         loading="lazy"
-        onerror={handleError}
+        decoding="async"
+        onerror={(e) => {
+          if (thumbnailUrl && e.target.src !== fullUrl) {
+            e.target.src = fullUrl;
+          } else {
+            handleError();
+          }
+        }}
       />
     {/if}
   </div>

@@ -1,5 +1,6 @@
 <script>
   import { registerMedia, unregisterMedia, PLAY_THRESHOLDS } from '../stores/videoPlayManager.js';
+  import { config } from '../stores/config.js';
 
   let { post } = $props();
 
@@ -149,12 +150,19 @@
               onerror={() => handleImageError(i)}
             ></video>
           {:else}
+            {@const thumbSrc = item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : null}
             <img
-              src={srcAttached && slideLoaded[i] ? item.url : undefined}
+              src={srcAttached && slideLoaded[i] ? (thumbSrc ?? item.url) : undefined}
               alt=""
               class="slide-media"
               decoding="async"
-              onerror={() => handleImageError(i)}
+              onerror={(e) => {
+                if (thumbSrc && e.target.src === thumbSrc) {
+                  e.target.src = item.url;
+                } else {
+                  handleImageError(i);
+                }
+              }}
             />
           {/if}
         </div>

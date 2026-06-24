@@ -2,6 +2,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
+const { execFile } = require('child_process');
 const cors = require('cors');
 const chokidar = require('chokidar');
 
@@ -9,6 +10,10 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
+const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
+
+// Deduplicates concurrent thumbnail requests for the same file
+const pendingThumbnails = new Map();
 
 // --- Caches ---
 // 1. Query Cache: key (seed+sort) -> array (sorted file list)
@@ -103,6 +108,7 @@ async function getImageFiles(dir) {
             return [{
               id: Buffer.from(relativePath).toString('base64'),
               url: `/media/${encodedUrlPath}`,
+              thumbnail_url: (type === 'video' || type === 'image') ? `/thumbnail/${encodedUrlPath}` : null,
               title: dirent.name,
               created_utc: stats.birthtimeMs / 1000,
               modified_utc: stats.mtimeMs / 1000,
@@ -166,6 +172,7 @@ function groupGalleryItems(files) {
         modified_utc: first.modified_utc,
         items: items.map(({ file }) => ({
           url: file.url,
+          thumbnail_url: file.thumbnail_url,
           title: file.title,
           post_hint: file.post_hint,
         })),
@@ -232,6 +239,57 @@ function startWatcher() {
     
   console.log('File watcher started on ' + PHOTOS_DIR);
 }
+
+// --- Thumbnail Generation ---
+async function generateThumbnail(mediaPath, thumbPath, isVideo) {
+  const args = isVideo
+    ? ['-ss', '1', '-i', mediaPath, '-vframes', '1', '-vf', 'scale=640:-1', '-q:v', '5', '-f', 'image2', thumbPath, '-y']
+    : ['-i', mediaPath, '-vf', 'scale=800:-1', '-q:v', '5', '-f', 'image2', thumbPath, '-y'];
+  return new Promise((resolve, reject) => {
+    execFile('ffmpeg', args, { timeout: 30000 }, (err) => err ? reject(err) : resolve());
+  });
+}
+
+app.use('/api/thumbnail', async (req, res) => {
+  if (req.method !== 'GET') { res.status(405).end(); return; }
+  try {
+    const relPath = req.path.slice(1); // strip leading '/', already URL-decoded by Express
+    if (!relPath) { res.status(400).end(); return; }
+
+    const mediaPath = path.resolve(PHOTOS_DIR, relPath);
+    const base = PHOTOS_DIR.endsWith(path.sep) ? PHOTOS_DIR : PHOTOS_DIR + path.sep;
+    if (!mediaPath.startsWith(base)) { res.status(403).end(); return; }
+
+    const thumbPath = path.join(THUMBNAILS_DIR, relPath + '.jpg');
+
+    // Serve from cache
+    try { await fs.access(thumbPath); res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); return res.sendFile(thumbPath); } catch {}
+
+    // Ensure source exists
+    try { await fs.access(mediaPath); } catch { res.status(404).end(); return; }
+
+    const isVideo = videoExts.test(relPath);
+    const isImage = imageExts.test(relPath) && !/\.svg$/i.test(relPath);
+    if (!isVideo && !isImage) { res.status(400).end(); return; }
+
+    // Deduplicate concurrent requests for the same thumbnail
+    if (!pendingThumbnails.has(thumbPath)) {
+      const p = (async () => {
+        await fs.mkdir(path.dirname(thumbPath), { recursive: true });
+        await generateThumbnail(mediaPath, thumbPath, isVideo);
+      })();
+      pendingThumbnails.set(thumbPath, p);
+      p.finally(() => pendingThumbnails.delete(thumbPath));
+    }
+    await pendingThumbnails.get(thumbPath);
+
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(thumbPath);
+  } catch (err) {
+    console.error('Thumbnail error:', err.message);
+    res.status(500).end();
+  }
+});
 
 // --- API Route ---
 app.get('/api/media', async (req, res) => {

@@ -1,4 +1,3 @@
-// src/stores/galleryStore.svelte.js
 import axios from 'axios';
 import { config } from './config.js';
 
@@ -13,12 +12,13 @@ function getMediaType(filename, hint) {
 function preloadItems(items) {
   for (const item of items) {
     const type = getMediaType(item.title || '', item.post_hint);
-    if (type === 'image') {
-      new Image().src = item.url;
+    // Preload the thumbnail (or full URL for non-thumbnail images) to warm the cache.
+    // Thumbnails are much smaller than originals so this doesn't saturate the connection pool.
+    if (type === 'image' || type === 'video') {
+      const url = item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : item.url;
+      if (type === 'image') new Image().src = url;
+      // Skip video thumbnail preload — the browser fetches poster lazily when needed.
     }
-    // Videos are not preloaded here — off-screen video elements with preload="auto"
-    // saturate the browser's connection pool and starve visible videos of bandwidth.
-    // Each MediaItem fetches only metadata on mount and buffers on play().
   }
 }
 
