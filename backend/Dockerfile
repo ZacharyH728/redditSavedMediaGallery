@@ -1,25 +1,24 @@
 # backend/Dockerfile
+FROM node:18-bookworm-slim
 
-# Use an official Node.js runtime as a parent image
-FROM node:18-alpine
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Set the working directory in the container
+# ffmpeg: media processing
+# intel-media-va-driver: iHD VA-API backend for Intel Arc (Xe/Alchemist) GPUs
+# libva-drm2: VA-API DRM backend (needed for headless/container GPU access)
+RUN apt-get update && apt-get install -y \
+  ffmpeg \
+  intel-media-va-driver \
+  libva-drm2 \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app/backend
 
-# Copy package.json and package-lock.json (if available)
-# Use wildcard to copy both if they exist
 COPY package*.json ./
-
-# Install backend dependencies
 RUN npm install
 
-# Install FFmpeg
-RUN apk update && apk add --no-cache ffmpeg
-
-# Copy the backend server code
 COPY server.js .
 
-# Make port 4000 available to the world outside this container
 EXPOSE 4000
 
 ARG REDDIT_CLIENT_ID
@@ -31,5 +30,4 @@ ENV PORT=$PORT
 ARG API_URL
 ENV API_URL=$API_URL
 
-# Define the command to run your app
-CMD [ "node", "server.js" ]
+CMD ["node", "server.js"]

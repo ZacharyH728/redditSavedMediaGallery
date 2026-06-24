@@ -11,9 +11,17 @@ const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
+const TRANSCODED_DIR = path.join(__dirname, 'transcoded');
+const VAAPI_DEVICE = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
+const TRANSCODE_CONCURRENCY = parseInt(process.env.TRANSCODE_CONCURRENCY || '2', 10);
 
 // Deduplicates concurrent thumbnail requests for the same file
 const pendingThumbnails = new Map();
+
+// --- Transcoding state ---
+const transcodedFiles = new Set();   // relative paths of completed .mp4 files
+const transcodeQueue = [];           // relative source paths waiting to be processed
+let activeTranscodes = 0;
 
 // --- Caches ---
 // 1. Query Cache: key (seed+sort) -> array (sorted file list)
@@ -105,7 +113,7 @@ async function getImageFiles(dir) {
             const relativePath = path.relative(PHOTOS_DIR, fullPath).replace(/\\/g, '/');
             const encodedUrlPath = relativePath.split('/').map(encodeURIComponent).join('/');
             
-            return [{
+            const fileObj = {
               id: Buffer.from(relativePath).toString('base64'),
               url: `/media/${encodedUrlPath}`,
               thumbnail_url: (type === 'video' || type === 'image') ? `/thumbnail/${encodedUrlPath}` : null,
@@ -115,7 +123,12 @@ async function getImageFiles(dir) {
               author: 'Local Library',
               subreddit: path.basename(path.dirname(fullPath)),
               post_hint: type,
-            }];
+            };
+            if (type === 'video') {
+              fileObj._relPath = relativePath;
+              fileObj._transcodedRelPath = relativePath.replace(/\.[^.]+$/, '.mp4');
+            }
+            return [fileObj];
           }
         }
       } catch (err) {
@@ -173,6 +186,8 @@ function groupGalleryItems(files) {
         items: items.map(({ file }) => ({
           url: file.url,
           thumbnail_url: file.thumbnail_url,
+          _relPath: file._relPath,
+          _transcodedRelPath: file._transcodedRelPath,
           title: file.title,
           post_hint: file.post_hint,
         })),
@@ -205,7 +220,7 @@ async function updateFileCache() {
 async function loadCacheFromDisk() {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
-    globalFileCache = groupGalleryItems(JSON.parse(data));
+    globalFileCache = groupGalleryItems(JSON.parse(data)).map(ensureInternalPaths);
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
   } catch (err) {
     console.log('No persistent cache found, scanning now...');
@@ -238,6 +253,153 @@ function startWatcher() {
     // but if metadata changes it might be useful. Keeping it simple for now.
     
   console.log('File watcher started on ' + PHOTOS_DIR);
+}
+
+// --- Transcoding ---
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    execFile('ffmpeg', args, { timeout: 0 }, (err) => err ? reject(err) : resolve());
+  });
+}
+
+async function getVideoCodec(inputPath) {
+  return new Promise((resolve) => {
+    execFile('ffprobe', [
+      '-v', 'quiet', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', inputPath
+    ], { timeout: 15000 }, (err, stdout) => resolve(err ? null : stdout.trim()));
+  });
+}
+
+async function transcodeVideo(relPath) {
+  const inputPath = path.join(PHOTOS_DIR, relPath);
+  const transcodedRelPath = relPath.replace(/\.[^.]+$/, '.mp4');
+  const outputPath = path.join(TRANSCODED_DIR, transcodedRelPath);
+  const tmpPath = outputPath + '.tmp';
+
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+
+  const codec = await getVideoCodec(inputPath);
+
+  if (codec === 'h264') {
+    // Already H.264 — remux into MP4 with faststart, no re-encode
+    await runFfmpeg([
+      '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
+      '-c', 'copy', '-movflags', '+faststart', '-y', tmpPath,
+    ]);
+  } else {
+    // Transcode to H.264 via VAAPI hardware encode
+    try {
+      await runFfmpeg([
+        '-vaapi_device', VAAPI_DEVICE,
+        '-i', inputPath,
+        '-map', '0:v:0', '-map', '0:a?',
+        '-vf', 'format=nv12,hwupload',
+        '-c:v', 'h264_vaapi', '-qp', '23',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart', '-y', tmpPath,
+      ]);
+    } catch (vaapiErr) {
+      console.warn(`VAAPI failed for ${relPath}: ${vaapiErr.message} — falling back to software encode`);
+      await runFfmpeg([
+        '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
+        '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart', '-y', tmpPath,
+      ]);
+    }
+  }
+
+  await fs.rename(tmpPath, outputPath);
+  transcodedFiles.add(transcodedRelPath);
+  console.log(`Transcoded: ${relPath}`);
+}
+
+function drainTranscodeQueue() {
+  while (transcodeQueue.length > 0 && activeTranscodes < TRANSCODE_CONCURRENCY) {
+    const relPath = transcodeQueue.shift();
+    activeTranscodes++;
+    transcodeVideo(relPath)
+      .catch(err => console.error(`Transcode failed [${relPath}]:`, err.message))
+      .finally(() => { activeTranscodes--; drainTranscodeQueue(); });
+  }
+}
+
+async function loadTranscodedFiles() {
+  async function scan(dir) {
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await scan(full);
+      } else if (entry.name.endsWith('.tmp')) {
+        await fs.unlink(full).catch(() => {}); // clean up crashed partial transcodes
+      } else if (entry.name.endsWith('.mp4')) {
+        transcodedFiles.add(path.relative(TRANSCODED_DIR, full).replace(/\\/g, '/'));
+      }
+    }
+  }
+  await fs.mkdir(TRANSCODED_DIR, { recursive: true });
+  await scan(TRANSCODED_DIR);
+  console.log(`Found ${transcodedFiles.size} already-transcoded files.`);
+}
+
+// Populate _relPath/_transcodedRelPath on cached files that were written before this field existed
+function ensureInternalPaths(file) {
+  if (file.post_hint === 'video' && !file._relPath && file.id) {
+    try {
+      file._relPath = Buffer.from(file.id, 'base64').toString('utf8');
+      file._transcodedRelPath = file._relPath.replace(/\.[^.]+$/, '.mp4');
+    } catch {}
+  }
+  if (file.post_hint === 'gallery' && Array.isArray(file.items)) {
+    file.items.forEach(item => {
+      if (item.post_hint === 'video' && !item._relPath && item.url) {
+        const rel = item.url.replace('/media/', '').split('/').map(decodeURIComponent).join('/');
+        item._relPath = rel;
+        item._transcodedRelPath = rel.replace(/\.[^.]+$/, '.mp4');
+      }
+    });
+  }
+  return file;
+}
+
+async function initTranscoding() {
+  await loadTranscodedFiles();
+  let queued = 0;
+  for (const file of globalFileCache) {
+    const videos = file.post_hint === 'video' ? [file]
+      : file.post_hint === 'gallery' ? (file.items || []).filter(i => i.post_hint === 'video')
+      : [];
+    for (const v of videos) {
+      if (v._relPath && v._transcodedRelPath && !transcodedFiles.has(v._transcodedRelPath)) {
+        transcodeQueue.push(v._relPath);
+        queued++;
+      }
+    }
+  }
+  console.log(`Queued ${queued} videos for transcoding (${TRANSCODE_CONCURRENCY} concurrent, VAAPI: ${VAAPI_DEVICE}).`);
+  drainTranscodeQueue();
+}
+
+// Strips internal fields and injects transcoded_url before sending to client
+function buildClientFile(file) {
+  const { _relPath, _transcodedRelPath, ...out } = file;
+  if (_transcodedRelPath && transcodedFiles.has(_transcodedRelPath)) {
+    out.transcoded_url = `/transcoded/${_transcodedRelPath.split('/').map(encodeURIComponent).join('/')}`;
+  }
+  if (out.post_hint === 'gallery' && Array.isArray(out.items)) {
+    out.items = out.items.map(item => {
+      const { _relPath: ir, _transcodedRelPath: itp, ...itemOut } = item;
+      if (itp && transcodedFiles.has(itp)) {
+        itemOut.transcoded_url = `/transcoded/${itp.split('/').map(encodeURIComponent).join('/')}`;
+      }
+      return itemOut;
+    });
+  }
+  return out;
 }
 
 // --- Thumbnail Generation ---
@@ -291,6 +453,20 @@ app.use('/api/thumbnail', async (req, res) => {
   }
 });
 
+// Serve transcoded files with long-lived caching
+app.use('/api/transcoded', express.static(TRANSCODED_DIR, {
+  setHeaders: (res) => res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'),
+}));
+
+app.get('/api/transcode-status', (req, res) => {
+  const totalVideos = globalFileCache.reduce((n, f) => {
+    if (f.post_hint === 'video') return n + 1;
+    if (f.post_hint === 'gallery') return n + (f.items || []).filter(i => i.post_hint === 'video').length;
+    return n;
+  }, 0);
+  res.json({ done: transcodedFiles.size, queued: transcodeQueue.length, active: activeTranscodes, total: totalVideos });
+});
+
 // --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
@@ -334,13 +510,13 @@ app.get('/api/media', async (req, res) => {
 
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
-    const files = processedFiles.slice(startIndex, endIndex);
+    const files = processedFiles.slice(startIndex, endIndex).map(buildClientFile);
     const hasMore = endIndex < processedFiles.length;
 
     res.json({
       data: {
         children: files,
-        after: hasMore 
+        after: hasMore,
       }
     });
   } catch (error) {
@@ -372,6 +548,9 @@ async function startServer() {
 
   // Start watching for changes
   startWatcher();
+
+  // Start background transcoding queue (does not block server startup)
+  initTranscoding().catch(err => console.error('initTranscoding error:', err));
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n==================================================`);

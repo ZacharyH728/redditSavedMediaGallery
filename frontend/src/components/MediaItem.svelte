@@ -6,6 +6,8 @@
   let { post } = $props();
   const fullUrl = post.url;
   const thumbnailUrl = post.thumbnail_url ? `${config.apiUrl}${post.thumbnail_url}` : null;
+  const transcodedUrl = post.transcoded_url ? `${config.apiUrl}${post.transcoded_url}` : null;
+  const videoSrc = transcodedUrl ?? fullUrl;
 
   function getMediaType(filename, hint) {
     if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
@@ -153,7 +155,7 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <video
         bind:this={mediaElement}
-        src={srcAttached ? fullUrl : undefined}
+        src={srcAttached ? videoSrc : undefined}
         poster={thumbnailUrl ?? undefined}
         controls={showControls}
         class="centered-media"

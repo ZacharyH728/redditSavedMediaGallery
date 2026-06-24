@@ -137,10 +137,12 @@
               <a href={item.url} target="_blank" rel="noopener noreferrer" onclick={(e) => e.stopPropagation()}>Open file</a>
             </div>
           {:else if item.post_hint === 'video'}
+            {@const slideSrc = item.transcoded_url ? `${config.apiUrl}${item.transcoded_url}` : item.url}
             <!-- svelte-ignore a11y_media_has_caption -->
             <video
               use:videoRef={i}
-              src={srcAttached && slideLoaded[i] ? item.url : undefined}
+              src={srcAttached && slideLoaded[i] ? slideSrc : undefined}
+              poster={item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : undefined}
               class="slide-media"
               preload="metadata"
               loop
