@@ -6,6 +6,17 @@ const { execFile } = require('child_process');
 const cors = require('cors');
 const chokidar = require('chokidar');
 
+// Defense in depth: a single failed ffmpeg call, corrupt file, or other
+// per-request error must never take down the whole server for every other
+// active user. One such gap already crashed this process in production
+// (see the /api/thumbnail route below) — this is a backstop for any others.
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled promise rejection (ignored to keep the server alive):', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (ignored to keep the server alive):', err);
+});
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
