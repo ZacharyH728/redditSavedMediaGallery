@@ -14,9 +14,34 @@ const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
 const TRANSCODED_DIR = path.join(__dirname, 'transcoded');
 const VAAPI_DEVICE = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
 const TRANSCODE_CONCURRENCY = parseInt(process.env.TRANSCODE_CONCURRENCY || '2', 10);
+const THUMBNAIL_CONCURRENCY = parseInt(process.env.THUMBNAIL_CONCURRENCY || '4', 10);
 
 // Deduplicates concurrent thumbnail requests for the same file
 const pendingThumbnails = new Map();
+
+// Caps how many ffmpeg thumbnail jobs run at once — without this, scrolling
+// fast through a batch of never-thumbnailed media can spawn one ffmpeg
+// process per image/video in view simultaneously.
+const thumbnailQueue = [];
+let activeThumbnails = 0;
+
+function enqueueThumbnail(run) {
+  return new Promise((resolve, reject) => {
+    thumbnailQueue.push({ run, resolve, reject });
+    drainThumbnailQueue();
+  });
+}
+
+function drainThumbnailQueue() {
+  while (thumbnailQueue.length > 0 && activeThumbnails < THUMBNAIL_CONCURRENCY) {
+    const { run, resolve, reject } = thumbnailQueue.shift();
+    activeThumbnails++;
+    run().then(resolve, reject).finally(() => {
+      activeThumbnails--;
+      drainThumbnailQueue();
+    });
+  }
+}
 
 // --- Transcoding state ---
 const transcodedFiles = new Set();   // relative paths of completed .mp4 files
@@ -437,14 +462,20 @@ app.use('/api/thumbnail', async (req, res) => {
     const isImage = imageExts.test(relPath) && !/\.svg$/i.test(relPath);
     if (!isVideo && !isImage) { res.status(400).end(); return; }
 
-    // Deduplicate concurrent requests for the same thumbnail
+    // Deduplicate concurrent requests for the same thumbnail, and cap how many
+    // distinct thumbnails generate at once via the queue.
     if (!pendingThumbnails.has(thumbPath)) {
-      const p = (async () => {
+      const p = enqueueThumbnail(async () => {
         await fs.mkdir(path.dirname(thumbPath), { recursive: true });
         await generateThumbnail(mediaPath, thumbPath, isVideo);
-      })();
+      });
       pendingThumbnails.set(thumbPath, p);
-      p.finally(() => pendingThumbnails.delete(thumbPath));
+      // .finally() propagates a rejection from p into a new promise that
+      // nothing else awaits; left unhandled, that crashes the whole process
+      // the moment ffmpeg fails on any one file. The actual rejection is
+      // already delivered to the caller via `await pendingThumbnails.get(...)`
+      // below — this chain exists only for the cleanup side effect.
+      p.finally(() => pendingThumbnails.delete(thumbPath)).catch(() => {});
     }
     await pendingThumbnails.get(thumbPath);
 

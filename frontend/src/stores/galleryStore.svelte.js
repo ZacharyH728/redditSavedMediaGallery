@@ -29,7 +29,7 @@ const store = $state({
   error: null,
   page: 1,
   seed: Date.now(),
-  order: 'random', // Default order
+  order: 'date', // Default order: stable and free to compute, unlike random's full-library shuffle
 
   // ACTION: Fetches the NEXT page of media
   async fetchMedia() {
