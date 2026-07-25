@@ -209,10 +209,13 @@ async function updateFileCache() {
   } catch (err) {
     console.error('Failed to write cache file:', err);
   }
-  
-  // Clear dependent caches
-  queryCache.clear(); 
-  
+
+  // Note: queryCache is intentionally left alone here. Each entry is a frozen
+  // permutation for one (sort, seed) pair; wiping it while a session is still
+  // paginating through it would make later pages reslice a differently-shaped
+  // array under the same seed, producing duplicate/skipped items mid-scroll.
+  // New files become visible via new cache keys (e.g. the next reshuffle).
+
   console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
 }
 
@@ -474,9 +477,11 @@ app.get('/api/media', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const sort = req.query.sort || 'random';
     const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();
-    
-    // Optimization: Generate a unique key for this view configuration
-    const cacheKey = `${sort}_${seed}`;
+
+    // Optimization: Generate a unique key for this view configuration.
+    // Non-random sorts don't depend on the seed, so every session sharing a
+    // sort order shares one cache entry instead of one each.
+    const cacheKey = sort === 'random' ? `random_${seed}` : sort;
 
     if (globalFileCache.length === 0) {
       // Fallback if empty
@@ -488,23 +493,31 @@ app.get('/api/media', async (req, res) => {
     // Optimization: Check Query Cache
     if (queryCache.has(cacheKey)) {
       processedFiles = queryCache.get(cacheKey);
+      // Bump recency: delete + re-set moves this key to the end of the Map's
+      // iteration order, which the eviction below treats as "most recent".
+      queryCache.delete(cacheKey);
+      queryCache.set(cacheKey, processedFiles);
     } else {
       // If not in cache, calculate and store it
       // NOTE: This prevents re-sorting/re-shuffling on every page turn
       processedFiles = [...globalFileCache];
-      
+
       if (sort === 'random') {
         processedFiles = shuffleArray(processedFiles, seed);
-      } else if (sort === 'date') {
-        processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
-      } else if (sort === 'modified') {
+      } else if (sort === 'date' || sort === 'modified') {
         processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else {
         processedFiles.sort((a, b) => a.title.localeCompare(b.title));
       }
 
-      // Store in LRU-like cache (simple cleanup strategy could be added)
-      if (queryCache.size > 100) queryCache.clear(); // Simple preventive clear
+      // Evict only the single least-recently-used entry once at capacity.
+      // A full clear() here would blow away other sessions' (or this one's,
+      // after a later refresh) frozen permutation mid-scroll — the same
+      // failure mode as the watcher-triggered clear() removed above.
+      if (queryCache.size >= 100) {
+        const oldestKey = queryCache.keys().next().value;
+        queryCache.delete(oldestKey);
+      }
       queryCache.set(cacheKey, processedFiles);
     }
 

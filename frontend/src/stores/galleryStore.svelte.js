@@ -80,6 +80,12 @@ const store = $state({
     }
   },
 
+  // ACTION: Drops the oldest `count` posts once they've scrolled far out of
+  // view, so a long session doesn't grow the feed (and its height cache) forever.
+  trimFront(count) {
+    this.posts = this.posts.slice(count);
+  },
+
   // ACTION: Reshuffles the gallery (new seed, reset page)
   reshuffle() {
     this.posts = [];

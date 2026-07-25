@@ -1,4 +1,5 @@
 <script>
+  import { tick } from 'svelte';
   import MediaItem from './MediaItem.svelte';
   import GalleryCarousel from './GalleryCarousel.svelte';
   import LoadingSpinner from './LoadingSpinner.svelte';
@@ -7,6 +8,10 @@
   const BUFFER = 3000;
   const GAP = 20;
   const DEFAULT_HEIGHT = 600;
+  // Once the viewport has scrolled this many items past the front of the feed,
+  // drop the oldest batch from state so a long session doesn't grow forever.
+  const KEEP_BEHIND = 150;
+  const EVICT_BATCH = 100;
 
   let scrollY = $state(0);
   let vpHeight = $state(typeof window !== 'undefined' ? window.innerHeight : 800);
@@ -14,6 +19,7 @@
   let heightVersion = $state(0);
 
   let rafPending = false;
+  let evicting = false;
 
   function onScroll() {
     if (rafPending) return;
@@ -123,6 +129,27 @@
     if (nearEnd) {
       galleryStore.fetchMedia();
     }
+  });
+
+  // Drop the oldest EVICT_BATCH posts once we're comfortably past them,
+  // compensating scroll position so the viewport doesn't jump. KEEP_BEHIND
+  // leaves enough slack that scrolling back up a bit doesn't run into the
+  // evicted edge.
+  async function evictFront(removeCount, shiftAmount, idsToForget) {
+    evicting = true;
+    for (const id of idsToForget) heightCache.delete(id);
+    galleryStore.trimFront(removeCount);
+    await tick(); // let the DOM re-layout against the shorter array first
+    window.scrollBy(0, -shiftAmount);
+    evicting = false;
+  }
+
+  $effect(() => {
+    if (evicting || startIdx <= KEEP_BEHIND + EVICT_BATCH) return;
+
+    const idsToForget = layout.slice(0, EVICT_BATCH).map(({ post }) => post.id);
+    const shiftAmount = layout[EVICT_BATCH].top;
+    evictFront(EVICT_BATCH, shiftAmount, idsToForget);
   });
 </script>
 
