@@ -64,6 +64,11 @@ let activeTranscodes = 0;
 const queryCache = new Map();
 // 2. Global File Index
 let globalFileCache = [];
+// Bumped every time globalFileCache is (re)built. Deterministic sorts fold this
+// into their cache key so that when files are added/removed the next request
+// recomputes against the fresh index instead of serving a stale frozen list —
+// otherwise newly-downloaded items never appear in the "added" sort.
+let cacheVersion = 0;
 
 // --- Middleware ---
 app.use(cors());
@@ -263,7 +268,8 @@ async function updateFileCache() {
   console.log('Updating file cache from disk...');
   const start = Date.now();
   globalFileCache = groupGalleryItems(await getImageFiles(PHOTOS_DIR));
-  
+  cacheVersion += 1;
+
   // Optimization: Write cache to disk
   try {
     await fs.writeFile(CACHE_FILE, JSON.stringify(globalFileCache));
@@ -558,8 +564,10 @@ app.get('/api/media', async (req, res) => {
 
     // Optimization: Generate a unique key for this view configuration.
     // Non-random sorts don't depend on the seed, so every session sharing a
-    // sort order shares one cache entry instead of one each.
-    const cacheKey = sort === 'random' ? `random_${seed}` : sort;
+    // sort order shares one cache entry instead of one each — but they DO depend
+    // on the current file index, so fold in cacheVersion to pick up added/removed
+    // files after a rescan.
+    const cacheKey = sort === 'random' ? `random_${seed}` : `${sort}_v${cacheVersion}`;
 
     if (globalFileCache.length === 0) {
       // Fallback if empty
@@ -582,7 +590,13 @@ app.get('/api/media', async (req, res) => {
 
       if (sort === 'random') {
         processedFiles = shuffleArray(processedFiles, seed);
-      } else if (sort === 'date' || sort === 'modified') {
+      } else if (sort === 'date' || sort === 'added') {
+        // "Added" = when the file landed in the library, i.e. its creation
+        // (birth) time. Deliberately NOT modified time: re-downloading a file
+        // whose size changed, transcoding, or any later touch bumps mtime and
+        // would wrongly jump an old item to the top of the "added" view.
+        processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+      } else if (sort === 'modified') {
         processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else {
         processedFiles.sort((a, b) => a.title.localeCompare(b.title));
