@@ -105,9 +105,35 @@ const imageExts = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff)$/i;
 const videoExts = /\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i;
 const audioExts = /\.(mp3|wav|ogg|m4a|flac|aac)$/i;
 
+// fs.stat/fs.readdir are dispatched to libuv's small fixed-size thread pool
+// (4 threads by default). Scanning a large library with unbounded concurrency
+// floods that pool — a full scan of tens of thousands of files can take
+// minutes instead of seconds, and every request queues up behind it.
+const FS_SCAN_CONCURRENCY = parseInt(process.env.FS_SCAN_CONCURRENCY || '32', 10);
+let activeFsOps = 0;
+const fsOpQueue = [];
+
+function limitFsOp(fn) {
+  return new Promise((resolve, reject) => {
+    fsOpQueue.push({ fn, resolve, reject });
+    drainFsOpQueue();
+  });
+}
+
+function drainFsOpQueue() {
+  while (fsOpQueue.length > 0 && activeFsOps < FS_SCAN_CONCURRENCY) {
+    const { fn, resolve, reject } = fsOpQueue.shift();
+    activeFsOps++;
+    fn().then(resolve, reject).finally(() => {
+      activeFsOps--;
+      drainFsOpQueue();
+    });
+  }
+}
+
 async function getImageFiles(dir) {
   try {
-    const dirents = await fs.readdir(dir, { withFileTypes: true });
+    const dirents = await limitFsOp(() => fs.readdir(dir, { withFileTypes: true }));
     
     // --- LIVE PHOTO DEDUPLICATION LOGIC ---
     // 1. Identify all image base names in this specific directory first.
@@ -145,7 +171,7 @@ async function getImageFiles(dir) {
             }
 
             // Optimization: Get stats strictly for what we need
-            const stats = await fs.stat(fullPath);
+            const stats = await limitFsOp(() => fs.stat(fullPath));
             const relativePath = path.relative(PHOTOS_DIR, fullPath).replace(/\\/g, '/');
             const encodedUrlPath = relativePath.split('/').map(encodeURIComponent).join('/');
             
@@ -255,6 +281,16 @@ async function updateFileCache() {
   console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
 }
 
+// Dedupes concurrent callers (watcher, cold-start /api/media, manual refresh)
+// onto a single in-flight scan instead of each kicking off its own full walk.
+let cacheUpdateInFlight = null;
+function updateFileCacheOnce() {
+  if (!cacheUpdateInFlight) {
+    cacheUpdateInFlight = updateFileCache().finally(() => { cacheUpdateInFlight = null; });
+  }
+  return cacheUpdateInFlight;
+}
+
 // --- Load Cache on Start ---
 async function loadCacheFromDisk() {
   try {
@@ -263,7 +299,7 @@ async function loadCacheFromDisk() {
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
   } catch (err) {
     console.log('No persistent cache found, scanning now...');
-    await updateFileCache();
+    await updateFileCacheOnce();
   }
 }
 
@@ -273,7 +309,7 @@ function scheduleCacheUpdate() {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     console.log('File change detected. Updating cache...');
-    updateFileCache();
+    updateFileCacheOnce();
   }, 5000); // 5 seconds debounce
 }
 
@@ -527,7 +563,7 @@ app.get('/api/media', async (req, res) => {
 
     if (globalFileCache.length === 0) {
       // Fallback if empty
-      await updateFileCache();
+      await updateFileCacheOnce();
     }
 
     let processedFiles;
@@ -580,14 +616,19 @@ app.get('/api/media', async (req, res) => {
   }
 });
 
-app.get('/api/refresh', async (req, res) => {
-  try {
-    await updateFileCache();
-    res.json({ message: 'Cache updated successfully', count: globalFileCache.length });
-  } catch (error) {
-    console.error("Error in /api/refresh:", error);
-    res.status(500).json({ error: 'Failed to update cache' });
-  }
+app.get('/api/refresh', (req, res) => {
+  // Even with bounded fs concurrency, a full scan of a very large library can
+  // take a while — don't hold the HTTP request (and whatever proxy sits in
+  // front of it) open for the whole duration. Kick it off and report the
+  // (possibly stale, about to be updated) count immediately.
+  updateFileCacheOnce().catch((error) => {
+    console.error("Error in background /api/refresh scan:", error);
+  });
+  res.json({ message: 'Cache refresh started in the background', count: globalFileCache.length });
+});
+
+app.get('/api/refresh-status', (req, res) => {
+  res.json({ inProgress: cacheUpdateInFlight !== null, count: globalFileCache.length });
 });
 
 async function startServer() {

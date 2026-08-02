@@ -2,6 +2,9 @@
 FROM node:18-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Default is 4 — too small once the library scan is issuing dozens of
+# concurrent fs.stat/fs.readdir calls (see FS_SCAN_CONCURRENCY in server.js).
+ENV UV_THREADPOOL_SIZE=16
 
 # ffmpeg: media processing
 # intel-media-va-driver: iHD VA-API backend for Intel Arc (Xe/Alchemist) GPUs

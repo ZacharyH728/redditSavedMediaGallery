@@ -92,7 +92,16 @@
     const updateRatio = registerMedia(itemElement, {
       play: () => {
         isVisible = true;
-        mediaElement?.play().catch(() => {});
+        if (!mediaElement) return;
+        // iOS suspends metadata-preloaded videos (readyState stays at HAVE_METADATA
+        // and networkState goes idle), so a bare play() rejects and never resumes the
+        // download — leaving the element black until a tap. Kick load() to force iOS
+        // to fetch enough data to actually start; handleCanPlay/loadeddata then plays it.
+        mediaElement.muted = audioPreferences.muted; // muted must be set before play() on iOS
+        if (mediaElement.readyState < 2 && mediaElement.networkState !== 2 /* NETWORK_LOADING */) {
+          mediaElement.load();
+        }
+        mediaElement.play().catch(() => {});
       },
       pause: () => {
         isVisible = false;
@@ -114,6 +123,9 @@
   // Retry play when buffered data arrives — fixes videos stuck in loading state.
   // The intersection observer's play() call can fail if the video hasn't buffered yet;
   // this fires once the browser has enough data and resumes if still in viewport.
+  // Bound to both `loadeddata` and `canplay`: iOS often fires `loadeddata`
+  // (HAVE_CURRENT_DATA) but suspends before reaching `canplay` (HAVE_FUTURE_DATA),
+  // so `loadeddata` is the earlier, more reliable hook to (re)start muted autoplay.
   function handleCanPlay() {
     if (isVisible && mediaElement) {
       mediaElement.play().catch(() => {});
@@ -167,6 +179,7 @@
         onerror={handleError}
         onclick={handleVideoClick}
         oncanplay={handleCanPlay}
+        onloadeddata={handleCanPlay}
       ></video>
     {:else if mediaType === 'audio'}
       <!-- svelte-ignore a11y_media_has_caption -->
