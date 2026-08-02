@@ -2,6 +2,8 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
+const os = require('os');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const cors = require('cors');
 const chokidar = require('chokidar');
@@ -23,6 +25,15 @@ const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
 const TRANSCODED_DIR = path.join(__dirname, 'transcoded');
+// ffmpeg muxes here (must be a LOCAL, seekable filesystem) before the finished
+// file is copied to TRANSCODED_DIR. MP4 muxing + `+faststart` seek backward to
+// patch atom sizes, which network/FUSE mounts (where TRANSCODED_DIR often lives)
+// reject with EINVAL. Defaults under __dirname (container overlay, disk-backed),
+// not os.tmpdir() which may be a size-limited tmpfs.
+const TRANSCODE_TMP_DIR = process.env.TRANSCODE_TMP_DIR || path.join(__dirname, '.tmp-transcode');
+// Records source paths whose transcode exhausted every fallback, so they aren't
+// re-queued (and re-failed) on every restart. Kept on the local overlay FS.
+const TRANSCODE_FAILURES_FILE = path.join(__dirname, 'transcode_failures.json');
 const VAAPI_DEVICE = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
 const TRANSCODE_CONCURRENCY = parseInt(process.env.TRANSCODE_CONCURRENCY || '2', 10);
 const THUMBNAIL_CONCURRENCY = parseInt(process.env.THUMBNAIL_CONCURRENCY || '4', 10);
@@ -57,6 +68,7 @@ function drainThumbnailQueue() {
 // --- Transcoding state ---
 const transcodedFiles = new Set();   // relative paths of completed .mp4 files
 const transcodeQueue = [];           // relative source paths waiting to be processed
+const failedTranscodes = new Set();  // source relPaths that exhausted every fallback
 let activeTranscodes = 0;
 
 // --- Caches ---
@@ -340,7 +352,13 @@ function startWatcher() {
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
-    execFile('ffmpeg', args, { timeout: 0 }, (err) => err ? reject(err) : resolve());
+    // ffmpeg logs progress/errors to stderr; capture it (with a generous buffer)
+    // so failures report the actual reason instead of a truncated "Command failed".
+    execFile('ffmpeg', args, { timeout: 0, maxBuffer: 1024 * 1024 * 16 }, (err, _stdout, stderr) => {
+      if (!err) return resolve();
+      const tail = (stderr || '').trim().split('\n').slice(-12).join('\n');
+      reject(new Error(`${err.message}${tail ? `\n--- ffmpeg stderr ---\n${tail}` : ''}`));
+    });
   });
 }
 
@@ -353,48 +371,74 @@ async function getVideoCodec(inputPath) {
   });
 }
 
+// Full software re-encode to H.264/AAC MP4 — the universal fallback that works
+// for any decodable input when copy/VAAPI can't.
+function softwareEncodeArgs(inputPath, localTmp) {
+  return [
+    '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
+    '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+    '-c:a', 'aac', '-b:a', '128k',
+    '-movflags', '+faststart', '-y', localTmp,
+  ];
+}
+
 async function transcodeVideo(relPath) {
   const inputPath = path.join(PHOTOS_DIR, relPath);
   const transcodedRelPath = relPath.replace(/\.[^.]+$/, '.mp4');
   const outputPath = path.join(TRANSCODED_DIR, transcodedRelPath);
-  const tmpPath = outputPath + '.tmp';
+  const netTmpPath = outputPath + '.tmp';
+  // Mux on a LOCAL seekable FS: MP4 muxing + faststart seek backward to patch
+  // atom sizes, which the network FS behind TRANSCODED_DIR rejects with EINVAL.
+  const localTmp = path.join(TRANSCODE_TMP_DIR, `${crypto.randomUUID()}.mp4`);
 
+  await fs.mkdir(TRANSCODE_TMP_DIR, { recursive: true });
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
-  const codec = await getVideoCodec(inputPath);
+  try {
+    const codec = await getVideoCodec(inputPath);
 
-  if (codec === 'h264') {
-    // Already H.264 — remux into MP4 with faststart, no re-encode
-    await runFfmpeg([
-      '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
-      '-c', 'copy', '-movflags', '+faststart', '-y', tmpPath,
-    ]);
-  } else {
-    // Transcode to H.264 via VAAPI hardware encode
-    try {
-      await runFfmpeg([
-        '-vaapi_device', VAAPI_DEVICE,
-        '-i', inputPath,
-        '-map', '0:v:0', '-map', '0:a?',
-        '-vf', 'format=nv12,hwupload',
-        '-c:v', 'h264_vaapi', '-qp', '23',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart', '-y', tmpPath,
-      ]);
-    } catch (vaapiErr) {
-      console.warn(`VAAPI failed for ${relPath}: ${vaapiErr.message} — falling back to software encode`);
-      await runFfmpeg([
-        '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
-        '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart', '-y', tmpPath,
-      ]);
+    if (codec === 'h264') {
+      // Already H.264 — remux into MP4 with faststart, no re-encode.
+      try {
+        await runFfmpeg([
+          '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
+          '-c', 'copy', '-movflags', '+faststart', '-y', localTmp,
+        ]);
+      } catch (copyErr) {
+        console.warn(`Remux (-c copy) failed for ${relPath}: ${copyErr.message} — falling back to software encode`);
+        await runFfmpeg(softwareEncodeArgs(inputPath, localTmp));
+      }
+    } else {
+      // Transcode to H.264 via VAAPI hardware encode, software fallback.
+      try {
+        await runFfmpeg([
+          '-vaapi_device', VAAPI_DEVICE,
+          '-i', inputPath,
+          '-map', '0:v:0', '-map', '0:a?',
+          '-vf', 'format=nv12,hwupload',
+          '-c:v', 'h264_vaapi', '-qp', '23',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart', '-y', localTmp,
+        ]);
+      } catch (vaapiErr) {
+        console.warn(`VAAPI failed for ${relPath}: ${vaapiErr.message} — falling back to software encode`);
+        await runFfmpeg(softwareEncodeArgs(inputPath, localTmp));
+      }
     }
-  }
 
-  await fs.rename(tmpPath, outputPath);
-  transcodedFiles.add(transcodedRelPath);
-  console.log(`Transcoded: ${relPath}`);
+    // Publish to the (possibly network) share with sequential writes only:
+    // copy the finished file, then a same-FS rename to swap it in atomically.
+    // A cross-device rename from localTmp would fail with EXDEV.
+    await fs.copyFile(localTmp, netTmpPath);
+    await fs.rename(netTmpPath, outputPath);
+    transcodedFiles.add(transcodedRelPath);
+    console.log(`Transcoded: ${relPath}`);
+  } catch (err) {
+    await fs.unlink(netTmpPath).catch(() => {});
+    throw err;
+  } finally {
+    await fs.unlink(localTmp).catch(() => {});
+  }
 }
 
 function drainTranscodeQueue() {
@@ -402,8 +446,35 @@ function drainTranscodeQueue() {
     const relPath = transcodeQueue.shift();
     activeTranscodes++;
     transcodeVideo(relPath)
-      .catch(err => console.error(`Transcode failed [${relPath}]:`, err.message))
+      .catch(err => {
+        console.error(`Transcode failed [${relPath}]:`, err.message);
+        // Remember it so we don't re-queue and re-fail it on every restart.
+        // Delete transcode_failures.json to retry everything.
+        failedTranscodes.add(relPath);
+        saveFailedTranscodes();
+      })
       .finally(() => { activeTranscodes--; drainTranscodeQueue(); });
+  }
+}
+
+let saveFailuresInFlight = null;
+async function saveFailedTranscodes() {
+  // Coalesce concurrent writers onto one serialized write so parallel failures
+  // don't clobber each other's file.
+  const data = JSON.stringify([...failedTranscodes]);
+  saveFailuresInFlight = (saveFailuresInFlight || Promise.resolve())
+    .then(() => fs.writeFile(TRANSCODE_FAILURES_FILE, data))
+    .catch(err => console.error('Failed to persist transcode failures:', err.message));
+  return saveFailuresInFlight;
+}
+
+async function loadFailedTranscodes() {
+  try {
+    const arr = JSON.parse(await fs.readFile(TRANSCODE_FAILURES_FILE, 'utf8'));
+    for (const p of arr) failedTranscodes.add(p);
+    console.log(`Loaded ${failedTranscodes.size} previously-failed transcodes (skipped).`);
+  } catch {
+    // No manifest yet — nothing to skip.
   }
 }
 
@@ -425,6 +496,10 @@ async function loadTranscodedFiles() {
   await fs.mkdir(TRANSCODED_DIR, { recursive: true });
   await scan(TRANSCODED_DIR);
   console.log(`Found ${transcodedFiles.size} already-transcoded files.`);
+
+  // Reset the local scratch dir so a crash mid-transcode doesn't leak temp files.
+  await fs.rm(TRANSCODE_TMP_DIR, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(TRANSCODE_TMP_DIR, { recursive: true });
 }
 
 // Populate _relPath/_transcodedRelPath on cached files that were written before this field existed
@@ -449,19 +524,22 @@ function ensureInternalPaths(file) {
 
 async function initTranscoding() {
   await loadTranscodedFiles();
+  await loadFailedTranscodes();
   let queued = 0;
+  let skipped = 0;
   for (const file of globalFileCache) {
     const videos = file.post_hint === 'video' ? [file]
       : file.post_hint === 'gallery' ? (file.items || []).filter(i => i.post_hint === 'video')
       : [];
     for (const v of videos) {
       if (v._relPath && v._transcodedRelPath && !transcodedFiles.has(v._transcodedRelPath)) {
+        if (failedTranscodes.has(v._relPath)) { skipped++; continue; }
         transcodeQueue.push(v._relPath);
         queued++;
       }
     }
   }
-  console.log(`Queued ${queued} videos for transcoding (${TRANSCODE_CONCURRENCY} concurrent, VAAPI: ${VAAPI_DEVICE}).`);
+  console.log(`Queued ${queued} videos for transcoding (${TRANSCODE_CONCURRENCY} concurrent, VAAPI: ${VAAPI_DEVICE})${skipped ? `, skipped ${skipped} previously-failed` : ''}.`);
   drainTranscodeQueue();
 }
 
