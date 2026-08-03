@@ -123,6 +123,13 @@ function shuffleArray(array, seed = null) {
   return newArray;
 }
 
+// "Added to library" timestamp for sorting: prefer birth time, but fall back to
+// modified time when the filesystem doesn't report birth time (created_utc === 0,
+// common on NFS/SMB), so the "newest" sort is never left comparing all-zeros.
+function addedTime(file) {
+  return file.created_utc > 0 ? file.created_utc : file.modified_utc;
+}
+
 // --- File Discovery ---
 const imageExts = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff)$/i;
 const videoExts = /\.(mp4|webm|mov|mkv|avi|wmv|flv|m4v)$/i;
@@ -677,11 +684,12 @@ app.get('/api/media', async (req, res) => {
       if (sort === 'random') {
         processedFiles = shuffleArray(processedFiles, seed);
       } else if (sort === 'date' || sort === 'added') {
-        // "Added" = when the file landed in the library, i.e. its creation
-        // (birth) time. Deliberately NOT modified time: re-downloading a file
-        // whose size changed, transcoding, or any later touch bumps mtime and
-        // would wrongly jump an old item to the top of the "added" view.
-        processedFiles.sort((a, b) => b.created_utc - a.created_utc);
+        // "Added" = when the file landed in the library. Prefer creation (birth)
+        // time — modified time gets bumped by re-downloads/transcoding and would
+        // wrongly jump an old item to the top. BUT many network filesystems
+        // (NFS/SMB) don't support birth time, so Node reports created_utc = 0 for
+        // every file; fall back to modified time there so the sort still works.
+        processedFiles.sort((a, b) => addedTime(b) - addedTime(a));
       } else if (sort === 'modified') {
         processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
       } else {
