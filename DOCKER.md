@@ -34,7 +34,33 @@ This project includes Docker support for easy deployment of both the backend and
 ### Backend
 - **Port:** 4000 (configurable via `BACKEND_PORT`)
 - **Technology:** Node.js + Express
-- **Volumes:** `./media` directory mounted as read-only
+- **Volumes:**
+  - `./media` (or your NFS photos path) mounted **read-only**
+  - The NFS `/transcodes` folder mounted **read-write** — transcoded `.mp4`s are
+    persisted here, alongside the photos on the NAS, **not** in a docker volume
+
+## Transcodes on the NAS
+
+Transcoded videos must be stored on the NFS NAS in a separate `/transcodes`
+folder alongside the photos — never in a docker volume or the container overlay,
+so they survive image/container rebuilds and are visible on the share.
+
+Bind-mount that NFS folder and point the backend at it via `TRANSCODED_DIR`:
+
+```yaml
+services:
+  backend:
+    environment:
+      - TRANSCODED_DIR=/transcodes
+    volumes:
+      - ${LOCAL_MEDIA_PATH}:/usr/src/app/backend/media:ro
+      - ${LOCAL_TRANSCODED_PATH}:/transcodes   # NFS NAS, read-write
+```
+
+Set `LOCAL_TRANSCODED_PATH` in `.env` to the host path of the NFS `/transcodes`
+folder (e.g. `/mnt/nas/transcodes`). ffmpeg still muxes to a local scratch dir
+(`TRANSCODE_TMP_DIR`, disk-backed) and only does a sequential copy onto the
+share, so the seek-heavy `+faststart` mux never runs directly on NFS.
 
 ### Frontend (Svelte)
 - **Port:** 3000 (configurable via `FRONTEND_PORT`)

@@ -24,7 +24,13 @@ const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
-const TRANSCODED_DIR = path.join(__dirname, 'transcoded');
+// Transcoded .mp4s must be persisted on the NFS NAS alongside the photos (a
+// bind-mounted `/transcodes` dir), NOT in a docker volume or the container
+// overlay — they need to survive container/image rebuilds and be visible on the
+// share. Set TRANSCODED_DIR to that mount point. The default under __dirname is
+// only for local dev; in the container it points at the NFS bind mount.
+// NOTE: this dir is a network/FUSE mount, hence the local-temp muxing below.
+const TRANSCODED_DIR = process.env.TRANSCODED_DIR || path.join(__dirname, 'transcoded');
 // ffmpeg muxes here (to a file with a real `.mp4` name) before the finished file
 // is copied to TRANSCODED_DIR. Two reasons the temp file lives here rather than
 // being written straight to TRANSCODED_DIR as `<name>.mp4.tmp`:
