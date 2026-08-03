@@ -25,11 +25,17 @@ const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
 const TRANSCODED_DIR = path.join(__dirname, 'transcoded');
-// ffmpeg muxes here (must be a LOCAL, seekable filesystem) before the finished
-// file is copied to TRANSCODED_DIR. MP4 muxing + `+faststart` seek backward to
-// patch atom sizes, which network/FUSE mounts (where TRANSCODED_DIR often lives)
-// reject with EINVAL. Defaults under __dirname (container overlay, disk-backed),
-// not os.tmpdir() which may be a size-limited tmpfs.
+// ffmpeg muxes here (to a file with a real `.mp4` name) before the finished file
+// is copied to TRANSCODED_DIR. Two reasons the temp file lives here rather than
+// being written straight to TRANSCODED_DIR as `<name>.mp4.tmp`:
+//   1. The `.tmp` extension is why transcoding failed for every file — ffmpeg
+//      picks the output muxer from the extension, and `.tmp` matches no container
+//      ("Unable to find a suitable output format"). A `.mp4` temp name fixes it.
+//   2. TRANSCODED_DIR is often a network/FUSE mount; muxing (esp. `+faststart`,
+//      which rewrites the moov atom in place) is seek-heavy, so we keep it on a
+//      local disk and only ever do a sequential copy to the share.
+// Defaults under __dirname (container overlay, disk-backed), not os.tmpdir()
+// which may be a size-limited tmpfs.
 const TRANSCODE_TMP_DIR = process.env.TRANSCODE_TMP_DIR || path.join(__dirname, '.tmp-transcode');
 // Records source paths whose transcode exhausted every fallback, so they aren't
 // re-queued (and re-failed) on every restart. Kept on the local overlay FS.
@@ -387,8 +393,10 @@ async function transcodeVideo(relPath) {
   const transcodedRelPath = relPath.replace(/\.[^.]+$/, '.mp4');
   const outputPath = path.join(TRANSCODED_DIR, transcodedRelPath);
   const netTmpPath = outputPath + '.tmp';
-  // Mux on a LOCAL seekable FS: MP4 muxing + faststart seek backward to patch
-  // atom sizes, which the network FS behind TRANSCODED_DIR rejects with EINVAL.
+  // Local mux target with a real `.mp4` extension so ffmpeg can resolve the
+  // output muxer (a `.tmp` extension can't be mapped to a container and fails
+  // with "Unable to find a suitable output format"). Also keeps seek-heavy
+  // muxing off the (often network-mounted) TRANSCODED_DIR.
   const localTmp = path.join(TRANSCODE_TMP_DIR, `${crypto.randomUUID()}.mp4`);
 
   await fs.mkdir(TRANSCODE_TMP_DIR, { recursive: true });
