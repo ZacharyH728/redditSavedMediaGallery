@@ -129,11 +129,24 @@ function shuffleArray(array, seed = null) {
   return newArray;
 }
 
-// "Added to library" timestamp for sorting: prefer birth time, but fall back to
-// modified time when the filesystem doesn't report birth time (created_utc === 0,
-// common on NFS/SMB), so the "newest" sort is never left comparing all-zeros.
+// "Newest" timestamp for sorting: modified time, i.e. the same field a plain
+// file browser (copyparty, `ls -t`, Finder's "Date Modified") sorts by, so the
+// gallery's order matches what you see on the share.
+//
+// This used to prefer birth time. Don't: the library lives on an NFS mount, and
+// Node/libuv only reports a real birth time when the kernel+FS answer statx()
+// with STATX_BTIME. When they don't, birthtimeMs is either 0 or a copy of
+// *ctime* (inode-change time) — and ctime is rewritten by any copy, rsync,
+// move, chmod or chown, so a bulk transfer to the NAS stamps thousands of old
+// files with the same recent "creation" date. That produced an order unrelated
+// to when anything was actually downloaded, while copyparty (mtime) stayed
+// correct. Worse, the old per-file fallback mixed the two bases in one sort:
+// files with a real btime were compared against other files' mtime.
+//
+// Birth time is kept only as a fallback for the (unusual) case of a file with
+// no usable mtime, so entries never sort as if they were from 1970.
 function addedTime(file) {
-  return file.created_utc > 0 ? file.created_utc : file.modified_utc;
+  return file.modified_utc > 0 ? file.modified_utc : file.created_utc;
 }
 
 // --- File Discovery ---
@@ -167,7 +180,81 @@ function drainFsOpQueue() {
   }
 }
 
+// TRANSCODED_DIR normally lives *inside* PHOTOS_DIR (both are on the NAS share:
+// /mnt/media/Photos and /mnt/media/Photos/transcodes). Nothing under it may be
+// indexed as library media. Without this guard the scanner picks up the last
+// pass's transcodes as brand-new source videos, transcodes them again into
+// transcodes/transcodes/…, and repeats every rescan — an exponential blow-up
+// that produced 31.5k of 44.5k cache entries, four levels of nesting deep, and
+// buried the "newest" sort under thousands of freshly-restamped duplicates
+// ordered by the transcoder's alphabetical queue rather than by download date.
+//
+// Two independent guards, because either alone has a blind spot:
+//
+//  1. By NAME (below). Any directory called `transcodes` anywhere under
+//     PHOTOS_DIR is skipped outright. This is deliberately hardcoded rather
+//     than derived from TRANSCODED_DIR so that keeping the transcode folder
+//     inside the photos share is safe by construction — no env var, mount
+//     layout, or future rename can quietly re-open the loop. It also catches
+//     already-nested leftovers (transcodes/transcodes/…) before they're indexed.
+//
+//  2. By DEVICE+INODE (registerExcludedDir). Matching TRANSCODED_DIR by path
+//     string is not enough: TRANSCODED_DIR and PHOTOS_DIR are two separate bind
+//     mounts of the same NAS folders, so the directory the scanner walks into
+//     (/usr/src/app/backend/media/transcodes) has a completely different path
+//     from the one we write to (/transcodes). A bind mount preserves the
+//     superblock, so dev+ino match. This covers a TRANSCODED_DIR that isn't
+//     named `transcodes`.
+const EXCLUDED_DIR_NAMES = new Set(['transcodes', 'thumbnails', '.tmp-transcode']);
+const excludedDirIds = new Set();   // "dev:ino"
+const excludedDirPaths = new Set(); // resolved paths, incl. ones matched by id
+
+// Only segments *below* PHOTOS_DIR are checked — if the library itself lived at
+// e.g. /mnt/media/thumbnails, matching against the full path would exclude
+// everything.
+function hasExcludedName(fullPath) {
+  const rel = path.relative(PHOTOS_DIR, path.resolve(fullPath));
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  return rel.split(path.sep).some(seg => EXCLUDED_DIR_NAMES.has(seg.toLowerCase()));
+}
+
+async function registerExcludedDir(dir) {
+  excludedDirPaths.add(path.resolve(dir));
+  try {
+    const s = await fs.stat(dir);
+    excludedDirIds.add(`${s.dev}:${s.ino}`);
+  } catch {
+    // Doesn't exist yet (created later by initTranscoding) — re-registered there.
+  }
+}
+
+function isExcludedPath(fullPath) {
+  if (hasExcludedName(fullPath)) return true;
+  const resolved = path.resolve(fullPath);
+  for (const ex of excludedDirPaths) {
+    if (resolved === ex || resolved.startsWith(ex + path.sep)) return true;
+  }
+  return false;
+}
+
+async function isExcludedDir(dirPath) {
+  if (isExcludedPath(dirPath)) return true;
+  if (excludedDirIds.size === 0) return false;
+  try {
+    const s = await limitFsOp(() => fs.stat(dirPath));
+    if (excludedDirIds.has(`${s.dev}:${s.ino}`)) {
+      // Memoize the path this dir is reached by, so the sync path check (and
+      // the watcher's sync `ignored`) catches it without re-statting.
+      excludedDirPaths.add(path.resolve(dirPath));
+      return true;
+    }
+  } catch { /* unreadable dir — the caller's own stat will handle it */ }
+  return false;
+}
+
 async function getImageFiles(dir) {
+  if (await isExcludedDir(dir)) return [];
+
   try {
     const dirents = await limitFsOp(() => fs.readdir(dir, { withFileTypes: true }));
     
@@ -334,6 +421,11 @@ async function loadCacheFromDisk() {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
     globalFileCache = groupGalleryItems(JSON.parse(data)).map(ensureInternalPaths);
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
+    // The persisted cache is a snapshot — serve from it immediately (fast boot),
+    // but refresh it in the background so a restart always picks up files (and
+    // updated mtimes) that appeared on the share while this was down or while
+    // the inotify watcher was blind to remote writes.
+    updateFileCacheOnce().catch(err => console.error('Startup rescan failed:', err));
   } catch (err) {
     console.log('No persistent cache found, scanning now...');
     await updateFileCacheOnce();
@@ -352,7 +444,10 @@ function scheduleCacheUpdate() {
 
 function startWatcher() {
   const watcher = chokidar.watch(PHOTOS_DIR, {
-    ignored: /(^|[\/\\])\../, // ignore dotfiles
+    // Ignore dotfiles, and everything under TRANSCODED_DIR — the transcoder
+    // writes there constantly, and since that dir is inside PHOTOS_DIR each
+    // write would otherwise schedule a rescan that queues yet more work.
+    ignored: (p) => /(^|[\/\\])\../.test(path.basename(p)) || isExcludedPath(p),
     persistent: true,
     ignoreInitial: true, // Don't trigger on existing files at startup
     depth: 99
@@ -365,6 +460,23 @@ function startWatcher() {
     // but if metadata changes it might be useful. Keeping it simple for now.
     
   console.log('File watcher started on ' + PHOTOS_DIR);
+}
+
+// The watcher above is inotify-based, and inotify does not see writes made by
+// *another host* to an NFS/SMB share — the downloader writes to the NAS, not to
+// this container, so 'add'/'unlink' may never fire here. Combined with the
+// persistent media_cache.json (loaded verbatim on boot), the index could stay
+// frozen indefinitely, which makes "newest" show the newest file as of the last
+// scan rather than the newest file on disk. Rescan on a timer as a backstop.
+// Set RESCAN_INTERVAL_MS=0 to disable (e.g. for a local, watcher-visible dir).
+const RESCAN_INTERVAL_MS = parseInt(process.env.RESCAN_INTERVAL_MS || String(15 * 60 * 1000), 10);
+
+function startPeriodicRescan() {
+  if (!RESCAN_INTERVAL_MS) return;
+  setInterval(() => {
+    updateFileCacheOnce().catch(err => console.error('Periodic rescan failed:', err));
+  }, RESCAN_INTERVAL_MS);
+  console.log(`Periodic rescan every ${Math.round(RESCAN_INTERVAL_MS / 1000)}s`);
 }
 
 // --- Transcoding ---
@@ -403,6 +515,11 @@ function softwareEncodeArgs(inputPath, localTmp) {
 
 async function transcodeVideo(relPath) {
   const inputPath = path.join(PHOTOS_DIR, relPath);
+  // Never transcode our own output — that's what created transcodes/transcodes/…
+  if (await isExcludedDir(path.dirname(inputPath))) {
+    console.warn(`Refusing to transcode a file inside TRANSCODED_DIR: ${relPath}`);
+    return;
+  }
   const transcodedRelPath = relPath.replace(/\.[^.]+$/, '.mp4');
   const outputPath = path.join(TRANSCODED_DIR, transcodedRelPath);
   const netTmpPath = outputPath + '.tmp';
@@ -545,6 +662,9 @@ function ensureInternalPaths(file) {
 
 async function initTranscoding() {
   await loadTranscodedFiles();
+  // loadTranscodedFiles mkdir -p's TRANSCODED_DIR; if it had to create it, the
+  // startup registration found nothing to stat, so pick up its id now.
+  await registerExcludedDir(TRANSCODED_DIR);
   await loadFailedTranscodes();
   let queued = 0;
   let skipped = 0;
@@ -554,6 +674,10 @@ async function initTranscoding() {
       : [];
     for (const v of videos) {
       if (v._relPath && v._transcodedRelPath && !transcodedFiles.has(v._transcodedRelPath)) {
+        // The persisted media_cache.json can still hold entries under
+        // transcodes/ from before the scanner excluded that tree; don't re-queue
+        // them on boot, or the runaway restarts before the rescan cleans up.
+        if (await isExcludedDir(path.dirname(path.join(PHOTOS_DIR, v._relPath)))) { skipped++; continue; }
         if (failedTranscodes.has(v._relPath)) { skipped++; continue; }
         transcodeQueue.push(v._relPath);
         queued++;
@@ -690,11 +814,7 @@ app.get('/api/media', async (req, res) => {
       if (sort === 'random') {
         processedFiles = shuffleArray(processedFiles, seed);
       } else if (sort === 'date' || sort === 'added') {
-        // "Added" = when the file landed in the library. Prefer creation (birth)
-        // time — modified time gets bumped by re-downloads/transcoding and would
-        // wrongly jump an old item to the top. BUT many network filesystems
-        // (NFS/SMB) don't support birth time, so Node reports created_utc = 0 for
-        // every file; fall back to modified time there so the sort still works.
+        // Newest first, by modified time — see addedTime() for why not birth time.
         processedFiles.sort((a, b) => addedTime(b) - addedTime(a));
       } else if (sort === 'modified') {
         processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
@@ -753,11 +873,17 @@ async function startServer() {
     await fs.mkdir(PHOTOS_DIR, { recursive: true });
   }
 
+  // Must happen before any scan: identifies TRANSCODED_DIR by dev+inode so the
+  // scanner recognises it under its other mount path inside PHOTOS_DIR.
+  await registerExcludedDir(TRANSCODED_DIR);
+  await registerExcludedDir(THUMBNAILS_DIR);
+
   // Optimization: Load from disk first
   await loadCacheFromDisk();
 
   // Start watching for changes
   startWatcher();
+  startPeriodicRescan();
 
   // Start background transcoding queue (does not block server startup)
   initTranscoding().catch(err => console.error('initTranscoding error:', err));
