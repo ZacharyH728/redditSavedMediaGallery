@@ -6,13 +6,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # concurrent fs.stat/fs.readdir calls (see FS_SCAN_CONCURRENCY in server.js).
 ENV UV_THREADPOOL_SIZE=16
 
-# ffmpeg: media processing
-# intel-media-va-driver: iHD VA-API backend for Intel Arc (Xe/Alchemist) GPUs
-# libva-drm2: VA-API DRM backend (needed for headless/container GPU access)
+# ffmpeg: thumbnail generation (software scale only — the VA-API driver packages
+# that used to be installed here existed for hardware video transcoding, which
+# has been removed).
 RUN apt-get update && apt-get install -y \
   ffmpeg \
-  intel-media-va-driver \
-  libva-drm2 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app/backend

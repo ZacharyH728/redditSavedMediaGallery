@@ -2,8 +2,6 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
-const os = require('os');
-const crypto = require('crypto');
 const { execFile } = require('child_process');
 const cors = require('cors');
 const chokidar = require('chokidar');
@@ -24,30 +22,6 @@ const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
 const CACHE_FILE = path.join(__dirname, 'media_cache.json');
 const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
-// Transcoded .mp4s must be persisted on the NFS NAS alongside the photos (a
-// bind-mounted `/transcodes` dir), NOT in a docker volume or the container
-// overlay — they need to survive container/image rebuilds and be visible on the
-// share. Set TRANSCODED_DIR to that mount point. The default under __dirname is
-// only for local dev; in the container it points at the NFS bind mount.
-// NOTE: this dir is a network/FUSE mount, hence the local-temp muxing below.
-const TRANSCODED_DIR = process.env.TRANSCODED_DIR || path.join(__dirname, 'transcoded');
-// ffmpeg muxes here (to a file with a real `.mp4` name) before the finished file
-// is copied to TRANSCODED_DIR. Two reasons the temp file lives here rather than
-// being written straight to TRANSCODED_DIR as `<name>.mp4.tmp`:
-//   1. The `.tmp` extension is why transcoding failed for every file — ffmpeg
-//      picks the output muxer from the extension, and `.tmp` matches no container
-//      ("Unable to find a suitable output format"). A `.mp4` temp name fixes it.
-//   2. TRANSCODED_DIR is often a network/FUSE mount; muxing (esp. `+faststart`,
-//      which rewrites the moov atom in place) is seek-heavy, so we keep it on a
-//      local disk and only ever do a sequential copy to the share.
-// Defaults under __dirname (container overlay, disk-backed), not os.tmpdir()
-// which may be a size-limited tmpfs.
-const TRANSCODE_TMP_DIR = process.env.TRANSCODE_TMP_DIR || path.join(__dirname, '.tmp-transcode');
-// Records source paths whose transcode exhausted every fallback, so they aren't
-// re-queued (and re-failed) on every restart. Kept on the local overlay FS.
-const TRANSCODE_FAILURES_FILE = path.join(__dirname, 'transcode_failures.json');
-const VAAPI_DEVICE = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
-const TRANSCODE_CONCURRENCY = parseInt(process.env.TRANSCODE_CONCURRENCY || '2', 10);
 const THUMBNAIL_CONCURRENCY = parseInt(process.env.THUMBNAIL_CONCURRENCY || '4', 10);
 
 // Deduplicates concurrent thumbnail requests for the same file
@@ -76,12 +50,6 @@ function drainThumbnailQueue() {
     });
   }
 }
-
-// --- Transcoding state ---
-const transcodedFiles = new Set();   // relative paths of completed .mp4 files
-const transcodeQueue = [];           // relative source paths waiting to be processed
-const failedTranscodes = new Set();  // source relPaths that exhausted every fallback
-let activeTranscodes = 0;
 
 // --- Caches ---
 // 1. Query Cache: key (seed+sort) -> array (sorted file list)
@@ -180,31 +148,28 @@ function drainFsOpQueue() {
   }
 }
 
-// TRANSCODED_DIR normally lives *inside* PHOTOS_DIR (both are on the NAS share:
-// /mnt/media/Photos and /mnt/media/Photos/transcodes). Nothing under it may be
-// indexed as library media. Without this guard the scanner picks up the last
-// pass's transcodes as brand-new source videos, transcodes them again into
-// transcodes/transcodes/…, and repeats every rescan — an exponential blow-up
-// that produced 31.5k of 44.5k cache entries, four levels of nesting deep, and
-// buried the "newest" sort under thousands of freshly-restamped duplicates
-// ordered by the transcoder's alphabetical queue rather than by download date.
+// Directories under PHOTOS_DIR that must never be indexed as library media.
 //
-// Two independent guards, because either alone has a blind spot:
+// `transcodes` and `.tmp-transcode` are leftovers from the removed transcoding
+// feature. The generated .mp4s still sit on the NAS share at
+// /mnt/media/Photos/transcodes, i.e. *inside* the photos tree, so this guard is
+// still load-bearing: without it the scanner indexes every one of them as a
+// second copy of a video already in the library, and — because their mtimes are
+// whenever the transcoder happened to run — buries the "newest" sort under
+// thousands of freshly-restamped duplicates ordered alphabetically rather than
+// by download date. Keep these names excluded until that folder is deleted from
+// the share.
 //
-//  1. By NAME (below). Any directory called `transcodes` anywhere under
-//     PHOTOS_DIR is skipped outright. This is deliberately hardcoded rather
-//     than derived from TRANSCODED_DIR so that keeping the transcode folder
-//     inside the photos share is safe by construction — no env var, mount
-//     layout, or future rename can quietly re-open the loop. It also catches
-//     already-nested leftovers (transcodes/transcodes/…) before they're indexed.
+// The match is by NAME, deliberately hardcoded: any directory so named anywhere
+// under PHOTOS_DIR is skipped outright, so no env var or mount layout can
+// quietly re-open the hole, and already-nested leftovers
+// (transcodes/transcodes/…) are caught too.
 //
-//  2. By DEVICE+INODE (registerExcludedDir). Matching TRANSCODED_DIR by path
-//     string is not enough: TRANSCODED_DIR and PHOTOS_DIR are two separate bind
-//     mounts of the same NAS folders, so the directory the scanner walks into
-//     (/usr/src/app/backend/media/transcodes) has a completely different path
-//     from the one we write to (/transcodes). A bind mount preserves the
-//     superblock, so dev+ino match. This covers a TRANSCODED_DIR that isn't
-//     named `transcodes`.
+// registerExcludedDir additionally matches by DEVICE+INODE, which is what
+// covers a dir reached under a different path than the one we know it by — two
+// bind mounts of the same NAS folder have different paths but, since a bind
+// mount preserves the superblock, the same dev+ino. THUMBNAILS_DIR is
+// registered that way at startup.
 const EXCLUDED_DIR_NAMES = new Set(['transcodes', 'thumbnails', '.tmp-transcode']);
 const excludedDirIds = new Set();   // "dev:ino"
 const excludedDirPaths = new Set(); // resolved paths, incl. ones matched by id
@@ -224,7 +189,7 @@ async function registerExcludedDir(dir) {
     const s = await fs.stat(dir);
     excludedDirIds.add(`${s.dev}:${s.ino}`);
   } catch {
-    // Doesn't exist yet (created later by initTranscoding) — re-registered there.
+    // Doesn't exist — nothing to match by id; the name guard still covers it.
   }
 }
 
@@ -309,10 +274,6 @@ async function getImageFiles(dir) {
               subreddit: path.basename(path.dirname(fullPath)),
               post_hint: type,
             };
-            if (type === 'video') {
-              fileObj._relPath = relativePath;
-              fileObj._transcodedRelPath = relativePath.replace(/\.[^.]+$/, '.mp4');
-            }
             return [fileObj];
           }
         }
@@ -371,8 +332,6 @@ function groupGalleryItems(files) {
         items: items.map(({ file }) => ({
           url: file.url,
           thumbnail_url: file.thumbnail_url,
-          _relPath: file._relPath,
-          _transcodedRelPath: file._transcodedRelPath,
           title: file.title,
           post_hint: file.post_hint,
         })),
@@ -419,7 +378,7 @@ function updateFileCacheOnce() {
 async function loadCacheFromDisk() {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
-    globalFileCache = groupGalleryItems(JSON.parse(data)).map(ensureInternalPaths);
+    globalFileCache = groupGalleryItems(JSON.parse(data));
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
     // The persisted cache is a snapshot — serve from it immediately (fast boot),
     // but refresh it in the background so a restart always picks up files (and
@@ -444,9 +403,9 @@ function scheduleCacheUpdate() {
 
 function startWatcher() {
   const watcher = chokidar.watch(PHOTOS_DIR, {
-    // Ignore dotfiles, and everything under TRANSCODED_DIR — the transcoder
-    // writes there constantly, and since that dir is inside PHOTOS_DIR each
-    // write would otherwise schedule a rescan that queues yet more work.
+    // Ignore dotfiles and every excluded dir (see EXCLUDED_DIR_NAMES) — those
+    // live inside PHOTOS_DIR, so without this each write under them would
+    // schedule a full rescan.
     ignored: (p) => /(^|[\/\\])\../.test(path.basename(p)) || isExcludedPath(p),
     persistent: true,
     ignoreInitial: true, // Don't trigger on existing files at startup
@@ -479,229 +438,13 @@ function startPeriodicRescan() {
   console.log(`Periodic rescan every ${Math.round(RESCAN_INTERVAL_MS / 1000)}s`);
 }
 
-// --- Transcoding ---
-
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    // ffmpeg logs progress/errors to stderr; capture it (with a generous buffer)
-    // so failures report the actual reason instead of a truncated "Command failed".
-    execFile('ffmpeg', args, { timeout: 0, maxBuffer: 1024 * 1024 * 16 }, (err, _stdout, stderr) => {
-      if (!err) return resolve();
-      const tail = (stderr || '').trim().split('\n').slice(-12).join('\n');
-      reject(new Error(`${err.message}${tail ? `\n--- ffmpeg stderr ---\n${tail}` : ''}`));
-    });
-  });
-}
-
-async function getVideoCodec(inputPath) {
-  return new Promise((resolve) => {
-    execFile('ffprobe', [
-      '-v', 'quiet', '-select_streams', 'v:0',
-      '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', inputPath
-    ], { timeout: 15000 }, (err, stdout) => resolve(err ? null : stdout.trim()));
-  });
-}
-
-// Full software re-encode to H.264/AAC MP4 — the universal fallback that works
-// for any decodable input when copy/VAAPI can't.
-function softwareEncodeArgs(inputPath, localTmp) {
-  return [
-    '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
-    '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
-    '-c:a', 'aac', '-b:a', '128k',
-    '-movflags', '+faststart', '-y', localTmp,
-  ];
-}
-
-async function transcodeVideo(relPath) {
-  const inputPath = path.join(PHOTOS_DIR, relPath);
-  // Never transcode our own output — that's what created transcodes/transcodes/…
-  if (await isExcludedDir(path.dirname(inputPath))) {
-    console.warn(`Refusing to transcode a file inside TRANSCODED_DIR: ${relPath}`);
-    return;
-  }
-  const transcodedRelPath = relPath.replace(/\.[^.]+$/, '.mp4');
-  const outputPath = path.join(TRANSCODED_DIR, transcodedRelPath);
-  const netTmpPath = outputPath + '.tmp';
-  // Local mux target with a real `.mp4` extension so ffmpeg can resolve the
-  // output muxer (a `.tmp` extension can't be mapped to a container and fails
-  // with "Unable to find a suitable output format"). Also keeps seek-heavy
-  // muxing off the (often network-mounted) TRANSCODED_DIR.
-  const localTmp = path.join(TRANSCODE_TMP_DIR, `${crypto.randomUUID()}.mp4`);
-
-  await fs.mkdir(TRANSCODE_TMP_DIR, { recursive: true });
-  await fs.mkdir(path.dirname(outputPath), { recursive: true });
-
-  try {
-    const codec = await getVideoCodec(inputPath);
-
-    if (codec === 'h264') {
-      // Already H.264 — remux into MP4 with faststart, no re-encode.
-      try {
-        await runFfmpeg([
-          '-i', inputPath, '-map', '0:v:0', '-map', '0:a?',
-          '-c', 'copy', '-movflags', '+faststart', '-y', localTmp,
-        ]);
-      } catch (copyErr) {
-        console.warn(`Remux (-c copy) failed for ${relPath}: ${copyErr.message} — falling back to software encode`);
-        await runFfmpeg(softwareEncodeArgs(inputPath, localTmp));
-      }
-    } else {
-      // Transcode to H.264 via VAAPI hardware encode, software fallback.
-      try {
-        await runFfmpeg([
-          '-vaapi_device', VAAPI_DEVICE,
-          '-i', inputPath,
-          '-map', '0:v:0', '-map', '0:a?',
-          '-vf', 'format=nv12,hwupload',
-          '-c:v', 'h264_vaapi', '-qp', '23',
-          '-c:a', 'aac', '-b:a', '128k',
-          '-movflags', '+faststart', '-y', localTmp,
-        ]);
-      } catch (vaapiErr) {
-        console.warn(`VAAPI failed for ${relPath}: ${vaapiErr.message} — falling back to software encode`);
-        await runFfmpeg(softwareEncodeArgs(inputPath, localTmp));
-      }
-    }
-
-    // Publish to the (possibly network) share with sequential writes only:
-    // copy the finished file, then a same-FS rename to swap it in atomically.
-    // A cross-device rename from localTmp would fail with EXDEV.
-    await fs.copyFile(localTmp, netTmpPath);
-    await fs.rename(netTmpPath, outputPath);
-    transcodedFiles.add(transcodedRelPath);
-    console.log(`Transcoded: ${relPath}`);
-  } catch (err) {
-    await fs.unlink(netTmpPath).catch(() => {});
-    throw err;
-  } finally {
-    await fs.unlink(localTmp).catch(() => {});
-  }
-}
-
-function drainTranscodeQueue() {
-  while (transcodeQueue.length > 0 && activeTranscodes < TRANSCODE_CONCURRENCY) {
-    const relPath = transcodeQueue.shift();
-    activeTranscodes++;
-    transcodeVideo(relPath)
-      .catch(err => {
-        console.error(`Transcode failed [${relPath}]:`, err.message);
-        // Remember it so we don't re-queue and re-fail it on every restart.
-        // Delete transcode_failures.json to retry everything.
-        failedTranscodes.add(relPath);
-        saveFailedTranscodes();
-      })
-      .finally(() => { activeTranscodes--; drainTranscodeQueue(); });
-  }
-}
-
-let saveFailuresInFlight = null;
-async function saveFailedTranscodes() {
-  // Coalesce concurrent writers onto one serialized write so parallel failures
-  // don't clobber each other's file.
-  const data = JSON.stringify([...failedTranscodes]);
-  saveFailuresInFlight = (saveFailuresInFlight || Promise.resolve())
-    .then(() => fs.writeFile(TRANSCODE_FAILURES_FILE, data))
-    .catch(err => console.error('Failed to persist transcode failures:', err.message));
-  return saveFailuresInFlight;
-}
-
-async function loadFailedTranscodes() {
-  try {
-    const arr = JSON.parse(await fs.readFile(TRANSCODE_FAILURES_FILE, 'utf8'));
-    for (const p of arr) failedTranscodes.add(p);
-    console.log(`Loaded ${failedTranscodes.size} previously-failed transcodes (skipped).`);
-  } catch {
-    // No manifest yet — nothing to skip.
-  }
-}
-
-async function loadTranscodedFiles() {
-  async function scan(dir) {
-    let entries;
-    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await scan(full);
-      } else if (entry.name.endsWith('.tmp')) {
-        await fs.unlink(full).catch(() => {}); // clean up crashed partial transcodes
-      } else if (entry.name.endsWith('.mp4')) {
-        transcodedFiles.add(path.relative(TRANSCODED_DIR, full).replace(/\\/g, '/'));
-      }
-    }
-  }
-  await fs.mkdir(TRANSCODED_DIR, { recursive: true });
-  await scan(TRANSCODED_DIR);
-  console.log(`Found ${transcodedFiles.size} already-transcoded files.`);
-
-  // Reset the local scratch dir so a crash mid-transcode doesn't leak temp files.
-  await fs.rm(TRANSCODE_TMP_DIR, { recursive: true, force: true }).catch(() => {});
-  await fs.mkdir(TRANSCODE_TMP_DIR, { recursive: true });
-}
-
-// Populate _relPath/_transcodedRelPath on cached files that were written before this field existed
-function ensureInternalPaths(file) {
-  if (file.post_hint === 'video' && !file._relPath && file.id) {
-    try {
-      file._relPath = Buffer.from(file.id, 'base64').toString('utf8');
-      file._transcodedRelPath = file._relPath.replace(/\.[^.]+$/, '.mp4');
-    } catch {}
-  }
-  if (file.post_hint === 'gallery' && Array.isArray(file.items)) {
-    file.items.forEach(item => {
-      if (item.post_hint === 'video' && !item._relPath && item.url) {
-        const rel = item.url.replace('/media/', '').split('/').map(decodeURIComponent).join('/');
-        item._relPath = rel;
-        item._transcodedRelPath = rel.replace(/\.[^.]+$/, '.mp4');
-      }
-    });
-  }
-  return file;
-}
-
-async function initTranscoding() {
-  await loadTranscodedFiles();
-  // loadTranscodedFiles mkdir -p's TRANSCODED_DIR; if it had to create it, the
-  // startup registration found nothing to stat, so pick up its id now.
-  await registerExcludedDir(TRANSCODED_DIR);
-  await loadFailedTranscodes();
-  let queued = 0;
-  let skipped = 0;
-  for (const file of globalFileCache) {
-    const videos = file.post_hint === 'video' ? [file]
-      : file.post_hint === 'gallery' ? (file.items || []).filter(i => i.post_hint === 'video')
-      : [];
-    for (const v of videos) {
-      if (v._relPath && v._transcodedRelPath && !transcodedFiles.has(v._transcodedRelPath)) {
-        // The persisted media_cache.json can still hold entries under
-        // transcodes/ from before the scanner excluded that tree; don't re-queue
-        // them on boot, or the runaway restarts before the rescan cleans up.
-        if (await isExcludedDir(path.dirname(path.join(PHOTOS_DIR, v._relPath)))) { skipped++; continue; }
-        if (failedTranscodes.has(v._relPath)) { skipped++; continue; }
-        transcodeQueue.push(v._relPath);
-        queued++;
-      }
-    }
-  }
-  console.log(`Queued ${queued} videos for transcoding (${TRANSCODE_CONCURRENCY} concurrent, VAAPI: ${VAAPI_DEVICE})${skipped ? `, skipped ${skipped} previously-failed` : ''}.`);
-  drainTranscodeQueue();
-}
-
-// Strips internal fields and injects transcoded_url before sending to client
+// Old media_cache.json files (written while video transcoding still existed)
+// carry these internal fields. Strip them so they can't leak to the client in
+// the window between boot and the startup rescan that rewrites the cache.
 function buildClientFile(file) {
   const { _relPath, _transcodedRelPath, ...out } = file;
-  if (_transcodedRelPath && transcodedFiles.has(_transcodedRelPath)) {
-    out.transcoded_url = `/transcoded/${_transcodedRelPath.split('/').map(encodeURIComponent).join('/')}`;
-  }
   if (out.post_hint === 'gallery' && Array.isArray(out.items)) {
-    out.items = out.items.map(item => {
-      const { _relPath: ir, _transcodedRelPath: itp, ...itemOut } = item;
-      if (itp && transcodedFiles.has(itp)) {
-        itemOut.transcoded_url = `/transcoded/${itp.split('/').map(encodeURIComponent).join('/')}`;
-      }
-      return itemOut;
-    });
+    out.items = out.items.map(({ _relPath: _ir, _transcodedRelPath: _itp, ...itemOut }) => itemOut);
   }
   return out;
 }
@@ -761,20 +504,6 @@ app.use('/api/thumbnail', async (req, res) => {
     console.error('Thumbnail error:', err.message);
     res.status(500).end();
   }
-});
-
-// Serve transcoded files with long-lived caching
-app.use('/api/transcoded', express.static(TRANSCODED_DIR, {
-  setHeaders: (res) => res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'),
-}));
-
-app.get('/api/transcode-status', (req, res) => {
-  const totalVideos = globalFileCache.reduce((n, f) => {
-    if (f.post_hint === 'video') return n + 1;
-    if (f.post_hint === 'gallery') return n + (f.items || []).filter(i => i.post_hint === 'video').length;
-    return n;
-  }, 0);
-  res.json({ done: transcodedFiles.size, queued: transcodeQueue.length, active: activeTranscodes, total: totalVideos });
 });
 
 // --- API Route ---
@@ -873,9 +602,8 @@ async function startServer() {
     await fs.mkdir(PHOTOS_DIR, { recursive: true });
   }
 
-  // Must happen before any scan: identifies TRANSCODED_DIR by dev+inode so the
-  // scanner recognises it under its other mount path inside PHOTOS_DIR.
-  await registerExcludedDir(TRANSCODED_DIR);
+  // Must happen before any scan: identifies the dir by dev+inode so the scanner
+  // recognises it even when reached under a different mount path.
   await registerExcludedDir(THUMBNAILS_DIR);
 
   // Optimization: Load from disk first
@@ -884,9 +612,6 @@ async function startServer() {
   // Start watching for changes
   startWatcher();
   startPeriodicRescan();
-
-  // Start background transcoding queue (does not block server startup)
-  initTranscoding().catch(err => console.error('initTranscoding error:', err));
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n==================================================`);

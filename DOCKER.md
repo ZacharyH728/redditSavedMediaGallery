@@ -36,31 +36,31 @@ This project includes Docker support for easy deployment of both the backend and
 - **Technology:** Node.js + Express
 - **Volumes:**
   - `./media` (or your NFS photos path) mounted **read-only**
-  - The NFS `/transcodes` folder mounted **read-write** — transcoded `.mp4`s are
-    persisted here, alongside the photos on the NAS, **not** in a docker volume
 
-## Transcodes on the NAS
+## Video transcoding (removed)
 
-Transcoded videos must be stored on the NFS NAS in a separate `/transcodes`
-folder alongside the photos — never in a docker volume or the container overlay,
-so they survive image/container rebuilds and are visible on the share.
+The backend used to pre-transcode every video to H.264 MP4 and serve those
+copies instead of the originals. That has been removed: videos are now served
+straight from the originals under `/media`, via nginx.
 
-Bind-mount that NFS folder and point the backend at it via `TRANSCODED_DIR`:
+It was measured to be doing nothing useful. The library is overwhelmingly
+already H.264, so nearly every file took the `-c copy` remux path — same
+resolution, same bitrate, same bytes on the wire — and the transcode output was
+consistently equal to or *larger* than the source. The encode paths never
+downscaled or capped bitrate, so there was no bandwidth reduction to be had,
+and serving the copies through Express was a slower path than nginx's `sendfile`
+on the originals. The only real benefit was `+faststart` and container
+normalisation for the handful of non-H.264 files.
 
-```yaml
-services:
-  backend:
-    environment:
-      - TRANSCODED_DIR=/transcodes
-    volumes:
-      - ${LOCAL_MEDIA_PATH}:/usr/src/app/backend/media:ro
-      - ${LOCAL_TRANSCODED_PATH}:/transcodes   # NFS NAS, read-write
-```
+If you want the startup-latency win back without the storage cost, the thing to
+add is not a transcoder — it's `-movflags +faststart` at download time in the
+downloader, plus a resolution/bitrate cap for genuinely oversized files.
 
-Set `LOCAL_TRANSCODED_PATH` in `.env` to the host path of the NFS `/transcodes`
-folder (e.g. `/mnt/nas/transcodes`). ffmpeg still muxes to a local scratch dir
-(`TRANSCODE_TMP_DIR`, disk-backed) and only does a sequential copy onto the
-share, so the seek-heavy `+faststart` mux never runs directly on NFS.
+Leftover `.mp4`s from the old feature may still be on the share at
+`/mnt/media/Photos/transcodes`. They are safe to delete. Until they are, the
+scanner keeps excluding any directory named `transcodes` (see
+`EXCLUDED_DIR_NAMES` in `backend/server.js`) so they aren't indexed as duplicate
+library entries.
 
 ### Frontend (Svelte)
 - **Port:** 3000 (configurable via `FRONTEND_PORT`)
