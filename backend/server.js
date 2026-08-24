@@ -20,8 +20,16 @@ process.on('uncaughtException', (err) => {
 const app = express();
 const PORT = process.env.PORT || 4000;
 const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(__dirname, 'media');
-const CACHE_FILE = path.join(__dirname, 'media_cache.json');
-const THUMBNAILS_DIR = path.join(__dirname, 'thumbnails');
+// Both of these default to a path inside the image, i.e. the container's
+// writable overlay layer, which Docker discards whenever the container is
+// recreated. That makes every redeploy throw away the whole thumbnail cache
+// (each tile then has to be re-rendered by ffmpeg over the network share, with
+// the request blocked while it waits) and the media index (forcing a full walk
+// of the library before anything can be served). Point CACHE_DIR and
+// THUMBNAILS_DIR at mounted paths in production so both survive a redeploy.
+const CACHE_DIR = process.env.CACHE_DIR || __dirname;
+const CACHE_FILE = path.join(CACHE_DIR, 'media_cache.json');
+const THUMBNAILS_DIR = process.env.THUMBNAILS_DIR || path.join(__dirname, 'thumbnails');
 const THUMBNAIL_CONCURRENCY = parseInt(process.env.THUMBNAIL_CONCURRENCY || '4', 10);
 
 // Deduplicates concurrent thumbnail requests for the same file
@@ -606,19 +614,27 @@ async function startServer() {
   // recognises it even when reached under a different mount path.
   await registerExcludedDir(THUMBNAILS_DIR);
 
-  // Optimization: Load from disk first
+  // Listen BEFORE the first cache load, not after. When there is no persisted
+  // cache to load (every fresh container, if CACHE_DIR isn't mounted), the load
+  // falls through to a full walk of the library — minutes of network-share I/O
+  // on a large one. Blocking app.listen on that made the port refuse
+  // connections for the whole duration, so a redeploy read as a hard outage
+  // rather than a slow start. /api/media awaits the in-flight scan itself, so a
+  // request that arrives early waits for real data instead of failing.
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n==================================================`);
+    console.log(`Optimized Backend server running on http://0.0.0.0:${PORT}`);
+    console.log(`Serving media from: ${PHOTOS_DIR}`);
+    console.log(`Index cache: ${CACHE_FILE}`);
+    console.log(`Thumbnails:  ${THUMBNAILS_DIR}`);
+    console.log(`==================================================\n`);
+  });
+
   await loadCacheFromDisk();
 
   // Start watching for changes
   startWatcher();
   startPeriodicRescan();
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n==================================================`);
-    console.log(`Optimized Backend server running on http://0.0.0.0:${PORT}`);
-    console.log(`Serving media from: ${PHOTOS_DIR}`);
-    console.log(`==================================================\n`);
-  });
 }
 
 startServer().catch(error => {
