@@ -60,7 +60,7 @@ function drainThumbnailQueue() {
 }
 
 // --- Caches ---
-// 1. Query Cache: key (seed+sort) -> array (sorted file list)
+// 1. Query Cache: key (seed+sort) -> { files, indexById } (see buildOrderedView)
 const queryCache = new Map();
 // 2. Global File Index
 let globalFileCache = [];
@@ -81,28 +81,91 @@ app.use((req, res, next) => {
 });
 
 // --- Utilities ---
-function createSeededRandom(seed) {
-  if (!seed) return Math.random;
-  let state = seed % 2147483647;
-  if (state <= 0) state += 2147483646;
-  return function() {
-    state = (state * 16807) % 2147483647;
-    return (state - 1) / 2147483646;
-  };
+//
+// Random order is a per-item rank derived from (seed, id), not a shuffle of the
+// index array.
+//
+// The old implementation was a seeded Fisher-Yates over a copy of
+// globalFileCache, cached per (sort, seed). That made an item's position a
+// function of the *shape of the array it happened to be shuffled in*, so a seed
+// only meant one order for as long as that exact array and that exact cache
+// entry both survived. Neither does: the index is rebuilt every
+// RESCAN_INTERVAL_MS (the downloader writes to the share continuously), the
+// query cache evicts at 100 entries, and a redeploy drops it entirely. After any
+// of those, the same seed re-shuffled a different-length array into a completely
+// different permutation — so the client's next offset-based page landed
+// somewhere unrelated and replayed runs of items it had already shown, in their
+// original relative order. That is the "whole sections repeated in the same
+// order" symptom.
+//
+// With an independent rank per item, adding/removing/re-indexing files never
+// moves any *other* item. One seed means one order, on any process, forever.
+function hash32(str, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0; // FNV-1a prime
+  }
+  // murmur3 finalizer: FNV-1a on its own leaves the high bits weakly mixed, and
+  // the high bits are precisely what the sort below compares.
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h >>> 0;
 }
 
-function shuffleArray(array, seed = null) {
-  let currentIndex = array.length, randomIndex;
-  const newArray = [...array];
-  const randomFn = seed ? createSeededRandom(seed) : Math.random;
+// Client seeds are Date.now(), ~41 bits. hash32 only consumes 32, so fold the
+// high bits in rather than letting >>> 0 silently discard them (without this,
+// seeds an exact multiple of 2^32 apart would produce the identical order).
+function normalizeSeed(seed) {
+  const n = Math.abs(Math.trunc(Number(seed))) || 1;
+  return ((n >>> 0) ^ Math.floor(n / 4294967296)) >>> 0;
+}
 
-  while (currentIndex !== 0) {
-    randomIndex = Math.floor(randomFn() * currentIndex);
-    currentIndex--;
-    [newArray[currentIndex], newArray[randomIndex]] = [
-      newArray[randomIndex], newArray[currentIndex]];
+// 53-bit rank: all 32 bits of one hash pass plus 21 from a second, independently
+// seeded pass. Exactly representable as a double, and wide enough that
+// collisions are vanishingly rare across a library of this size — and a
+// collision only means those two items order by id instead of at random.
+const RANK_SCALE = 2097152; // 2**21
+function randomRank(id, seed) {
+  const h1 = hash32(id, (seed ^ 0x9e3779b9) >>> 0);
+  const h2 = hash32(id, (seed + 0x7f4a7c15) >>> 0);
+  return h1 * RANK_SCALE + (h2 >>> 11);
+}
+
+function compareIds(a, b) {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+// Produces the full ordered view for one (sort, seed) plus an id -> position
+// index, which is what lets /api/media resolve a cursor in O(1).
+//
+// Every comparator ends in an id tiebreaker. Array.prototype.sort is stable, so
+// without one, items with equal timestamps (or equal titles) would be left in
+// whatever order the directory walk produced — and that order changes across
+// rescans, which would silently reintroduce the same cursor drift this whole
+// change exists to remove.
+function buildOrderedView(sort, seed) {
+  const files = [...globalFileCache];
+
+  if (sort === 'random') {
+    const ranks = new Map();
+    for (const f of files) ranks.set(f.id, randomRank(f.id, seed));
+    files.sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || compareIds(a, b));
+  } else if (sort === 'date' || sort === 'added') {
+    // Newest first, by modified time — see addedTime() for why not birth time.
+    files.sort((a, b) => addedTime(b) - addedTime(a) || compareIds(a, b));
+  } else if (sort === 'modified') {
+    files.sort((a, b) => b.modified_utc - a.modified_utc || compareIds(a, b));
+  } else {
+    files.sort((a, b) => a.title.localeCompare(b.title) || compareIds(a, b));
   }
-  return newArray;
+
+  const indexById = new Map();
+  for (let i = 0; i < files.length; i++) indexById.set(files[i].id, i);
+  return { files, indexById };
 }
 
 // "Newest" timestamp for sorting: modified time, i.e. the same field a plain
@@ -363,11 +426,10 @@ async function updateFileCache() {
     console.error('Failed to write cache file:', err);
   }
 
-  // Note: queryCache is intentionally left alone here. Each entry is a frozen
-  // permutation for one (sort, seed) pair; wiping it while a session is still
-  // paginating through it would make later pages reslice a differently-shaped
-  // array under the same seed, producing duplicate/skipped items mid-scroll.
-  // New files become visible via new cache keys (e.g. the next reshuffle).
+  // Note: queryCache is intentionally left alone here — entries are keyed by
+  // cacheVersion, so bumping it above already orphans every stale view and the
+  // LRU reclaims them. Don't clear() it: that would also drop views other
+  // requests are mid-flight on, for no benefit.
 
   console.log(`Cache updated with ${globalFileCache.length} files in ${Date.now() - start}ms`);
 }
@@ -517,68 +579,81 @@ app.use('/api/thumbnail', async (req, res) => {
 // --- API Route ---
 app.get('/api/media', async (req, res) => {
   try {
-    const limit = 50;
-    const page = parseInt(req.query.page) || 1;
-    const sort = req.query.sort || 'random';
-    const seed = req.query.seed ? parseInt(req.query.seed) : Date.now();
+    // A response without cache headers is heuristically cacheable, and iOS
+    // Safari (especially a standalone PWA, which has its own cache partition)
+    // will happily reuse one — replaying an identical page of items on a later
+    // request. Feed pages are per-session and must never be reused.
+    res.setHeader('Cache-Control', 'no-store');
 
-    // Optimization: Generate a unique key for this view configuration.
-    // Non-random sorts don't depend on the seed, so every session sharing a
-    // sort order shares one cache entry instead of one each — but they DO depend
-    // on the current file index, so fold in cacheVersion to pick up added/removed
-    // files after a rescan.
-    const cacheKey = sort === 'random' ? `random_${seed}` : `${sort}_v${cacheVersion}`;
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+    const sort = req.query.sort || 'random';
+    const seed = normalizeSeed(req.query.seed ? parseInt(req.query.seed) : Date.now());
 
     if (globalFileCache.length === 0) {
       // Fallback if empty
       await updateFileCacheOnce();
     }
 
-    let processedFiles;
+    // cacheVersion is folded into EVERY key now, random included. That used to
+    // be unsafe (a rescan would reshuffle a session's order mid-scroll) but is
+    // correct with per-item ranks: a re-sort leaves every surviving item in the
+    // same place relative to the others, and the id cursor below resolves to
+    // the right spot in the new array. Files that appear mid-session now show
+    // up in their proper random slot instead of being invisible until the user
+    // reshuffles.
+    const cacheKey = sort === 'random'
+      ? `random_${seed}_v${cacheVersion}`
+      : `${sort}_v${cacheVersion}`;
 
-    // Optimization: Check Query Cache
-    if (queryCache.has(cacheKey)) {
-      processedFiles = queryCache.get(cacheKey);
+    let view = queryCache.get(cacheKey);
+    if (view) {
       // Bump recency: delete + re-set moves this key to the end of the Map's
       // iteration order, which the eviction below treats as "most recent".
       queryCache.delete(cacheKey);
-      queryCache.set(cacheKey, processedFiles);
+      queryCache.set(cacheKey, view);
     } else {
-      // If not in cache, calculate and store it
-      // NOTE: This prevents re-sorting/re-shuffling on every page turn
-      processedFiles = [...globalFileCache];
-
-      if (sort === 'random') {
-        processedFiles = shuffleArray(processedFiles, seed);
-      } else if (sort === 'date' || sort === 'added') {
-        // Newest first, by modified time — see addedTime() for why not birth time.
-        processedFiles.sort((a, b) => addedTime(b) - addedTime(a));
-      } else if (sort === 'modified') {
-        processedFiles.sort((a, b) => b.modified_utc - a.modified_utc);
-      } else {
-        processedFiles.sort((a, b) => a.title.localeCompare(b.title));
-      }
-
+      view = buildOrderedView(sort, seed);
       // Evict only the single least-recently-used entry once at capacity.
-      // A full clear() here would blow away other sessions' (or this one's,
-      // after a later refresh) frozen permutation mid-scroll — the same
-      // failure mode as the watcher-triggered clear() removed above.
       if (queryCache.size >= 100) {
-        const oldestKey = queryCache.keys().next().value;
-        queryCache.delete(oldestKey);
+        queryCache.delete(queryCache.keys().next().value);
       }
-      queryCache.set(cacheKey, processedFiles);
+      queryCache.set(cacheKey, view);
     }
 
-    const startIndex = (page - 1) * limit;
-    const endIndex = startIndex + limit;
-    const files = processedFiles.slice(startIndex, endIndex).map(buildClientFile);
-    const hasMore = endIndex < processedFiles.length;
+    const { files: ordered, indexById } = view;
+
+    // Where this request continues from. The id cursor is exact and survives a
+    // re-index, which is the whole point: offset pagination assumed the list
+    // never changed shape under it. `offset` is a fallback for the one case the
+    // cursor can't cover — the cursor item having been deleted from the library
+    // since the previous page — and `page` is kept only so a stale cached
+    // frontend build keeps working.
+    let startIndex;
+    const offsetHint = Math.min(
+      Math.max(parseInt(req.query.offset) || 0, 0),
+      ordered.length
+    );
+    if (req.query.cursor) {
+      const at = indexById.get(req.query.cursor);
+      startIndex = at !== undefined ? at + 1 : offsetHint;
+    } else if (req.query.offset !== undefined) {
+      startIndex = offsetHint;
+    } else {
+      startIndex = Math.max((parseInt(req.query.page) || 1) - 1, 0) * limit;
+    }
+    startIndex = Math.min(startIndex, ordered.length);
+
+    const slice = ordered.slice(startIndex, startIndex + limit);
+    const endIndex = startIndex + slice.length;
 
     res.json({
       data: {
-        children: files,
-        after: hasMore,
+        children: slice.map(buildClientFile),
+        after: endIndex < ordered.length,
+        // Pass these straight back on the next request to continue the feed.
+        cursor: slice.length > 0 ? slice[slice.length - 1].id : (req.query.cursor ?? null),
+        offset: endIndex,
+        total: ordered.length,
       }
     });
   } catch (error) {

@@ -4,6 +4,7 @@
   import GalleryCarousel from './GalleryCarousel.svelte';
   import LoadingSpinner from './LoadingSpinner.svelte';
   import { galleryStore } from '../stores/galleryStore.svelte.js';
+  import { setPrefetchWindow } from '../stores/mediaPrefetcher.js';
 
   const BUFFER = 3000;
   const GAP = 20;
@@ -12,6 +13,13 @@
   // drop the oldest batch from state so a long session doesn't grow forever.
   const KEEP_BEHIND = 150;
   const EVICT_BATCH = 100;
+  // How many items past the one at the top of the viewport to pull the full
+  // file for. Items are roughly one screen tall, so this is "the next few
+  // swipes". Going much wider mostly wastes bandwidth on media the user
+  // scrolls straight past.
+  const PREFETCH_AHEAD = 4;
+  // Gallery posts: only the slides the carousel will show without a swipe.
+  const PREFETCH_SLIDES = 2;
 
   let scrollY = $state(0);
   let vpHeight = $state(typeof window !== 'undefined' ? window.innerHeight : 800);
@@ -129,6 +137,55 @@
     if (nearEnd) {
       galleryStore.fetchMedia();
     }
+  });
+
+  // Index of the item currently at the top of the viewport. Prefetching is
+  // anchored here rather than to endIdx, because endIdx already includes BUFFER
+  // (3000px) worth of mounted-but-offscreen items — anchoring there would start
+  // prefetching only *past* the items the user is about to reach.
+  function findFocus(lo, hi) {
+    let result = hi;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (layout[mid].top + layout[mid].height > scrollY) {
+        result = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return result;
+  }
+
+  const focusIdx = $derived(
+    layout.length === 0 ? 0 : findFocus(0, layout.length - 1)
+  );
+
+  function collectMedia(post, out) {
+    if (post.post_hint === 'gallery') {
+      for (const item of (post.items ?? []).slice(0, PREFETCH_SLIDES)) {
+        out.push({ url: item.url, type: item.post_hint === 'video' ? 'video' : 'image' });
+      }
+    } else if (post.post_hint === 'video') {
+      out.push({ url: post.url, type: 'video' });
+    } else if (post.post_hint === 'image') {
+      out.push({ url: post.url, type: 'image' });
+    }
+    // Audio is left out: it streams fine and there's no visual pop-in to hide.
+  }
+
+  const prefetchWindow = $derived.by(() => {
+    const out = [];
+    const last = Math.min(layout.length - 1, focusIdx + PREFETCH_AHEAD);
+    // Nearest-first, so the queue drains in the order the user will reach them.
+    for (let i = focusIdx + 1; i <= last; i++) {
+      collectMedia(layout[i].post, out);
+    }
+    return out;
+  });
+
+  $effect(() => {
+    setPrefetchWindow(prefetchWindow);
   });
 
   // Drop the oldest EVICT_BATCH posts once we're comfortably past them,

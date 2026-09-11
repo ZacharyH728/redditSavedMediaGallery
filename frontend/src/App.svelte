@@ -21,6 +21,10 @@
     // play() calls on those same elements for the rest of the session.
     function unlockVideos() {
       document.querySelectorAll('video').forEach(video => {
+        // Skip whatever is already playing: priming it would pause the video
+        // the user is watching (until the play manager's watchdog restarts it
+        // a second later), which reads as a stutter on the very first tap.
+        if (!video.paused) return;
         video.play().then(() => video.pause()).catch(() => {});
       });
     }

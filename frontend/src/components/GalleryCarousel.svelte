@@ -16,7 +16,24 @@
   const videoRefs = {};
   function videoRef(el, index) {
     videoRefs[index] = el;
-    return { destroy() { delete videoRefs[index]; } };
+    // Hand the AVPlayer back when this slide is destroyed, not just when the
+    // carousel scrolls out of range — see releaseVideo in MediaItem for why
+    // leaking these is what kills autoplay partway down the feed on iOS.
+    return {
+      destroy() {
+        releaseVideo(el);
+        delete videoRefs[index];
+      }
+    };
+  }
+
+  function releaseVideo(el) {
+    if (!el) return;
+    try {
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    } catch { /* element already torn down */ }
   }
 
   // Near-viewport observer: attach/detach video sources to free decoder + buffer +
@@ -30,14 +47,9 @@
         srcAttached = false;
         // Force immediate release — Svelte's reactive src removal lands next tick,
         // so we also call pause/load directly to free the decoder slot right now.
-        Object.values(videoRefs).forEach(el => {
-          if (!el) return;
-          el.pause();
-          el.removeAttribute('src');
-          el.load();
-        });
+        Object.values(videoRefs).forEach(releaseVideo);
       }
-    }, { rootMargin: '800px' });
+    }, { rootMargin: '1600px' });
     nearObserver.observe(containerEl);
     return () => nearObserver.disconnect();
   });
@@ -49,6 +61,14 @@
     const updateRatio = registerMedia(containerEl, {
       play: () => { carouselInView = true; },
       pause: () => { carouselInView = false; },
+      // Re-assert the current slide after an iOS suspension (see the watchdog
+      // in videoPlayManager).
+      resume: () => {
+        const el = videoRefs[currentIndex];
+        if (el && el.paused && carouselInView && srcAttached) {
+          el.play().catch(() => {});
+        }
+      },
     });
     const observer = new IntersectionObserver(
       (entries) => updateRatio(entries[0].intersectionRatio),
@@ -143,7 +163,7 @@
               src={srcAttached && slideLoaded[i] ? item.url : undefined}
               poster={item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : undefined}
               class="slide-media"
-              preload="metadata"
+              preload="auto"
               loop
               playsinline
               muted
@@ -152,14 +172,15 @@
             ></video>
           {:else}
             {@const thumbSrc = item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : null}
+            <!-- Original file, with the thumbnail as the error fallback — see MediaItem. -->
             <img
-              src={srcAttached && slideLoaded[i] ? (thumbSrc ?? item.url) : undefined}
+              src={srcAttached && slideLoaded[i] ? item.url : undefined}
               alt=""
               class="slide-media"
               decoding="async"
               onerror={(e) => {
-                if (thumbSrc && e.target.src === thumbSrc) {
-                  e.target.src = item.url;
+                if (thumbSrc && e.target.src !== thumbSrc) {
+                  e.target.src = thumbSrc;
                 } else {
                   handleImageError(i);
                 }

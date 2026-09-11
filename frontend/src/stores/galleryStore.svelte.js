@@ -1,76 +1,78 @@
 import axios from 'axios';
 import { config } from './config.js';
+import { resetPrefetcher } from './mediaPrefetcher.js';
 
-function getMediaType(filename, hint) {
-  if (hint && ['image', 'video', 'audio'].includes(hint)) return hint;
-  const ext = (filename || '').split('.').pop().toLowerCase();
-  if (['mp4', 'webm', 'mov', 'mkv', 'avi', 'wmv', 'flv', 'm4v'].includes(ext)) return 'video';
-  if (['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ext)) return 'audio';
-  return 'image';
-}
-
-function preloadItems(items) {
-  for (const item of items) {
-    const type = getMediaType(item.title || '', item.post_hint);
-    // Preload the thumbnail (or full URL for non-thumbnail images) to warm the cache.
-    // Thumbnails are much smaller than originals so this doesn't saturate the connection pool.
-    if (type === 'image' || type === 'video') {
-      const url = item.thumbnail_url ? `${config.apiUrl}${item.thumbnail_url}` : item.url;
-      if (type === 'image') new Image().src = url;
-      // Skip video thumbnail preload — the browser fetches poster lazily when needed.
-    }
-  }
-}
+// Every id this session has ever appended. Deliberately NOT cleared by
+// trimFront: the dedupe filter used to compare against `posts`, so as soon as
+// an item was evicted off the front of the feed the client lost all memory of
+// it and would happily re-append it if the backend ever sent it again. Combined
+// with the old unstable pagination, that is how already-seen runs of items
+// reappeared further down the scroll. Kept as a plain Set (not $state) — it is
+// only ever consulted, never rendered.
+let seenIds = new Set();
 
 const store = $state({
   posts: [],
   isLoading: false,
   hasMorePosts: true,
   error: null,
-  page: 1,
+  // Cursor pagination: `cursor` is the id of the last item received, `offset`
+  // its position in the ordered view. The server prefers the cursor (exact,
+  // survives a mid-session re-index) and only falls back to the offset if that
+  // item has since been deleted from the library.
+  cursor: null,
+  offset: 0,
   seed: Date.now(),
   order: 'random', // Default order: a fresh full-library shuffle each session
 
-  // ACTION: Fetches the NEXT page of media
-  async fetchMedia() {
+  // ACTION: Fetches the NEXT page of media.
+  // `retriesLeft` covers the case where a whole page comes back as items this
+  // session has already shown (possible right after a library re-index): the
+  // feed's "near the end" effect won't re-fire on its own because posts.length
+  // didn't change, so keep pulling rather than stalling at the bottom.
+  async fetchMedia(retriesLeft = 5) {
     if (this.isLoading || !this.hasMorePosts) return;
 
     this.isLoading = true;
     this.error = null;
 
+    let appended = 0;
     try {
-      // Pass params to backend: seed, page, and sort order
       const response = await axios.get(`${config.apiUrl}/media`, {
         params: {
           seed: this.seed,
-          page: this.page,
-          sort: this.order
+          sort: this.order,
+          cursor: this.cursor ?? undefined,
+          offset: this.offset,
         }
       });
-      
-      const newItems = response.data.data.children || [];
-      const hasMore = response.data.data.after;
+
+      const body = response.data.data;
+      const newItems = body.children || [];
+
+      // Advance the cursor from the response even if every item turns out to be
+      // a duplicate — otherwise the next request asks for the same slice again
+      // and the feed deadlocks at the bottom.
+      if (body.cursor) this.cursor = body.cursor;
+      if (typeof body.offset === 'number') this.offset = body.offset;
 
       if (newItems.length > 0) {
-        // DEDUPLICATION:
-        // Filter out any items that are already in the list.
-        // This is a safety net in case the backend shuffle isn't perfect or state gets desynced.
-        const uniqueNewItems = newItems.filter(newItem => 
-          !this.posts.some(existing => existing.id === newItem.id)
-        );
-
-        // Append the new, unique items
-        this.posts = [...this.posts, ...uniqueNewItems];
-
-        // Preload media bytes in the background before they're scrolled to
-        preloadItems(uniqueNewItems);
-
-        // Prepare for the next page
-        this.page += 1;
+        // O(n) dedupe against everything seen this session (see seenIds above),
+        // not just what's currently mounted.
+        const uniqueNewItems = [];
+        for (const item of newItems) {
+          if (seenIds.has(item.id)) continue;
+          seenIds.add(item.id);
+          uniqueNewItems.push(item);
+        }
+        appended = uniqueNewItems.length;
+        if (appended > 0) {
+          this.posts = [...this.posts, ...uniqueNewItems];
+        }
       }
-      
+
       // Update the "has more" flag based on backend response
-      this.hasMorePosts = hasMore;
+      this.hasMorePosts = body.after;
 
     } catch (err) {
       console.error('Error fetching media:', err);
@@ -78,21 +80,32 @@ const store = $state({
     } finally {
       this.isLoading = false;
     }
+
+    if (appended === 0 && this.hasMorePosts && !this.error && retriesLeft > 0) {
+      await this.fetchMedia(retriesLeft - 1);
+    }
   },
 
   // ACTION: Drops the oldest `count` posts once they've scrolled far out of
   // view, so a long session doesn't grow the feed (and its height cache) forever.
+  // Note this does NOT forget their ids — see seenIds.
   trimFront(count) {
     this.posts = this.posts.slice(count);
   },
 
-  // ACTION: Reshuffles the gallery (new seed, reset page)
+  // ACTION: Reshuffles the gallery (new seed, reset pagination)
   reshuffle() {
     this.posts = [];
     this.hasMorePosts = true;
     this.error = null;
     this.isLoading = false;
-    this.page = 1;
+    this.cursor = null;
+    this.offset = 0;
+    // A new seed is a genuinely new order over the whole library, so previously
+    // shown items are fair game again and must be forgotten — otherwise every
+    // reshuffle would return a feed with holes in it.
+    seenIds = new Set();
+    resetPrefetcher();
     this.seed = Date.now(); // New seed = new random order
     this.fetchMedia();
   },
