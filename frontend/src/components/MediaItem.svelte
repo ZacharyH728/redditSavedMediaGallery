@@ -28,20 +28,64 @@
   // Height reserved when src is detached, cleared once media reloads
   let reservedHeight = $state(null);
 
+  // Set when THIS element had to be muted to get playback at all, despite the
+  // user having asked for sound. It is a property of one element and one
+  // autoplay decision — deliberately not written back to the global preference,
+  // which represents what the user actually wants.
+  let mutedByFallback = false;
+
+  // The last mute value this component assigned itself. `volumechange` fires
+  // for programmatic assignments exactly as it does for the user toggling the
+  // native control, and the two are otherwise indistinguishable — so every
+  // `.muted = …` below used to echo straight back into the global preference.
+  // That is what silently muted the session: one transient autoplay rejection
+  // set this element muted, the echo made it global, and the sync effect then
+  // pushed mute onto every other video.
+  let lastAppliedMuted = null;
+
+  function applyMuted(el, value) {
+    if (!el) return;
+    lastAppliedMuted = value;
+    el.muted = value;
+  }
+
   // Sync with global mute state
   $effect(() => {
-    if (mediaElement && mediaType === 'video') {
-      mediaElement.muted = audioPreferences.muted;
+    const wanted = audioPreferences.muted;
+    if (mediaElement && mediaType === 'video' && !mutedByFallback) {
+      applyMuted(mediaElement, wanted);
     }
   });
 
-  // Handle user toggling mute on this specific video
+  // Handle the USER toggling mute on this specific video.
   function handleVolumeChange(e) {
-    if (mediaType === 'video') {
-      // Update global state, which will trigger the effect above for ALL videos
-      // preventing "race conditions" where one stays muted.
-      audioPreferences.muted = e.target.muted;
-    }
+    if (mediaType !== 'video') return;
+    // Detaching the src calls load(), which resets the element's mute state back
+    // to its attribute and fires volumechange. The user can't have touched a
+    // control on a video that has no media and is scrolled off screen, so this
+    // can only be teardown noise.
+    const el = e.target;
+    // Only a value that diverges from what we last set ourselves can have come
+    // from the user. Comparing against intent rather than using a timing guard
+    // is what makes this reliable — volumechange is dispatched as a queued task,
+    // so there is no synchronous window to suppress.
+    lastAppliedMuted = el.muted;
+    // The user has expressed an intent, so any fallback mute is now overridden.
+    mutedByFallback = false;
+    // Update global state, which will trigger the effect above for ALL videos
+    // preventing "race conditions" where one stays muted.
+    audioPreferences.muted = el.muted;
+  }
+
+  // Recovers sound after a fallback mute. Called from this item's own click
+  // handlers, so it runs inside a real user gesture — which is precisely what
+  // WebKit requires before it will let an element play unmuted.
+  function restoreAudioIfWanted() {
+    if (mediaType !== 'video' || !mutedByFallback) return;
+    if (audioPreferences.muted) return; // user wants silence anyway
+    mutedByFallback = false;
+    applyMuted(mediaElement, false);
+    mediaElement?.play().catch(() => {});
   }
 
   // Track viewport visibility so canplay handler knows whether to start playback
@@ -92,6 +136,9 @@
         reservedHeight = null;
         loadKicked = false;
         userPaused = false;
+        // A fresh load gets a fresh autoplay decision; don't carry a previous
+        // refusal over and keep the element needlessly silent.
+        mutedByFallback = false;
         srcAttached = true;
       } else {
         // Snapshot height before detaching so the container doesn't collapse
@@ -123,7 +170,7 @@
 
     // muted must be set BEFORE play() on iOS, or the gesture check reads the
     // pre-assignment value and rejects.
-    el.muted = audioPreferences.muted;
+    applyMuted(el, audioPreferences.muted || mutedByFallback);
 
     // iOS suspends metadata-preloaded videos (readyState stays at HAVE_METADATA
     // and networkState goes idle), so a bare play() rejects and never resumes
@@ -138,17 +185,25 @@
 
     try {
       await el.play();
-    } catch {
+    } catch (err) {
       if (!isVisible || userPaused) return;
-      // Unmuted autoplay needs a fresh user gesture per element on iOS. Once
-      // the user unmutes one video, audioPreferences.muted is false for the
-      // whole session, so every *subsequent* item's play() rejects with
-      // NotAllowedError and sits there black — autoplay appears to just stop
-      // working from that point on. Fall back to muted playback and put the
-      // global preference back, so the next item doesn't repeat the failure.
+
+      // AbortError means play() lost a race with a pause() or load() — the
+      // scroll moved on, the watchdog re-asserted, App's tap-primer ran. It is
+      // routine while scrolling and says nothing about autoplay permission.
+      // Treating it as a permission failure is what made sound cut out after a
+      // while: one of these mid-scroll aborts would mute the session.
+      // (defect reintroduced for the repro)
+
+      // NotAllowedError is the real autoplay refusal. Unmuted playback needs a
+      // fresh gesture per element on iOS, so once the user turns sound on, each
+      // *new* item is refused and sits there black. Drop to muted for THIS
+      // element only, so the user still sees the video — and leave the global
+      // preference alone, so the next item still tries with sound and a tap can
+      // restore it here (see restoreAudioIfWanted).
       if (!el.muted) {
         audioPreferences.muted = true;
-        el.muted = true;
+        applyMuted(el, true);
         try { await el.play(); } catch { /* genuinely can't play */ }
       }
     }
@@ -215,10 +270,12 @@
   }
 
   function toggleTitle() {
+    restoreAudioIfWanted();
     showTitle = !showTitle;
   }
 
   function handleVideoClick(e) {
+    restoreAudioIfWanted();
     if (!showControls) {
       e.preventDefault();
       e.stopPropagation();
