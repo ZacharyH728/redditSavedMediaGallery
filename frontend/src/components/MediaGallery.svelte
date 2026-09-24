@@ -5,6 +5,7 @@
   import LoadingSpinner from './LoadingSpinner.svelte';
   import { galleryStore } from '../stores/galleryStore.svelte.js';
   import { setPrefetchWindow } from '../stores/mediaPrefetcher.js';
+  import { reportView } from '../stores/viewReporter.js';
 
   const BUFFER = 3000;
   const GAP = 20;
@@ -20,6 +21,11 @@
   const PREFETCH_AHEAD = 4;
   // Gallery posts: only the slides the carousel will show without a swipe.
   const PREFETCH_SLIDES = 2;
+  // How long an item has to hold the focus position before it counts as shown.
+  // A fling-scroll crosses twenty items in about a second and the user saw none
+  // of them, so counting on arrival would badly inflate the numbers that the
+  // least-shown sort orders against.
+  const DWELL_MS = 1000;
 
   let scrollY = $state(0);
   let vpHeight = $state(typeof window !== 'undefined' ? window.innerHeight : 800);
@@ -207,6 +213,28 @@
     const idsToForget = layout.slice(0, EVICT_BATCH).map(({ post }) => post.id);
     const shiftAmount = layout[EVICT_BATCH].top;
     evictFront(EVICT_BATCH, shiftAmount, idsToForget);
+  });
+
+  // --- "This was actually shown" tracking ---
+  //
+  // Anchored on focusIdx (the item at the top of the viewport), NOT on
+  // visibleItems/endIdx — those carry BUFFER (3000px) worth of mounted but
+  // never-seen items, and counting those would be flatly wrong.
+  //
+  // Keyed on the ID rather than on focusIdx or layout: `layout` is recomputed
+  // on every ResizeObserver height measurement (heightVersion), so an effect
+  // reading it would restart the dwell timer constantly and never fire.
+  // $derived doesn't notify dependents when the new value is === the old, so a
+  // string id is a stable gate — and it survives trimFront, which shifts every
+  // index but no id. Gallery posts count once per group, since post.id is the
+  // group id and carousel slide changes don't touch it.
+  const focusId = $derived(layout[focusIdx]?.post?.id ?? null);
+
+  $effect(() => {
+    const id = focusId;
+    if (!id) return;
+    const t = setTimeout(() => reportView(id), DWELL_MS);
+    return () => clearTimeout(t);
   });
 </script>
 

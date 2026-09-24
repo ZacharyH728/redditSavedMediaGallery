@@ -18,7 +18,10 @@ WORKDIR /usr/src/app/backend
 COPY package*.json ./
 RUN npm install
 
-COPY server.js .
+# Both files, not just server.js: server.js requires ./viewCounts.js, and a
+# single-file COPY here builds a perfectly good image that dies on boot with
+# MODULE_NOT_FOUND.
+COPY server.js viewCounts.js ./
 
 EXPOSE 4000
 

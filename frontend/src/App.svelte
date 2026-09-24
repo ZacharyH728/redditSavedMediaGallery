@@ -4,10 +4,6 @@
   import { galleryStore } from './stores/galleryStore.svelte.js';
   import { onMount } from 'svelte';
 
-  // This is the correct way to use $derived.
-  // It MUST be a top-level constant declaration.
-  const isRandomOrder = $derived(galleryStore.order === 'random');
-
   onMount(() => {
     if (galleryStore.posts.length === 0) {
       galleryStore.fetchMedia();
@@ -36,16 +32,15 @@
     galleryStore.reshuffle();
   }
 
-  function toggleOrderMode() {
-    const newOrder = galleryStore.order === 'random' ? 'date' : 'random';
+  function cycleOrderMode(newOrder) {
     galleryStore.setOrder(newOrder);
   }
 </script>
 
 <div class="app">
-  <Header 
-    {isRandomOrder}
-    onToggleOrder={toggleOrderMode}
+  <Header
+    order={galleryStore.order}
+    onCycleOrder={cycleOrderMode}
     onReshuffle={handleReshuffle}
   />
   

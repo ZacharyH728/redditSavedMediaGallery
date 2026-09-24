@@ -5,6 +5,15 @@ const fs = require('fs').promises;
 const { execFile } = require('child_process');
 const cors = require('cors');
 const chokidar = require('chokidar');
+const {
+  viewCounts,
+  loadViewCounts,
+  setLibraryIdsProvider,
+  recordView,
+  getSnapshot,
+  snapshotCount,
+  flushViewsSync,
+} = require('./viewCounts');
 
 // Defense in depth: a single failed ffmpeg call, corrupt file, or other
 // per-request error must never take down the whole server for every other
@@ -62,8 +71,23 @@ function drainThumbnailQueue() {
 // --- Caches ---
 // 1. Query Cache: key (seed+sort) -> { files, indexById } (see buildOrderedView)
 const queryCache = new Map();
+
+// Each cached view is a full-library array plus a full-library id->index Map —
+// on the order of 10MB at 200k files. The flat cap of 100 this used to carry
+// was therefore worth over a gigabyte of resident memory on a large library,
+// and it is genuinely reachable: every page load mints a new seed and every
+// rescan a new cacheVersion, so each one is a fresh key. Scale the cap to the
+// library instead, so the cache costs roughly the same regardless of size.
+function queryCacheLimit() {
+  return Math.max(8, Math.floor(2e6 / Math.max(globalFileCache.length, 1)));
+}
 // 2. Global File Index
 let globalFileCache = [];
+// Every id currently in the library. Maintained alongside globalFileCache so
+// POST /api/views can reject ids that aren't real files (without it, a looping
+// or hostile client grows the persisted count map without bound) and so the
+// pruner knows what still exists. Rebuilt, never mutated in place.
+let globalIdSet = new Set();
 // Bumped every time globalFileCache is (re)built. Deterministic sorts fold this
 // into their cache key so that when files are added/removed the next request
 // recomputes against the fresh index instead of serving a stale frozen list —
@@ -147,10 +171,30 @@ function compareIds(a, b) {
 // whatever order the directory walk produced — and that order changes across
 // rescans, which would silently reintroduce the same cursor drift this whole
 // change exists to remove.
-function buildOrderedView(sort, seed) {
-  const files = [...globalFileCache];
+function buildOrderedView(sort, seed, snap) {
+  let files = [...globalFileCache];
 
-  if (sort === 'random') {
+  if (sort === 'least_shown') {
+    // Least-shown first, ties broken randomly. `snap` is a frozen per-session
+    // baseline, NOT the live counts — see the long note in viewCounts.js for
+    // why serving this from live counts would teleport the cursor.
+    //
+    // Decorated rather than comparing through two Map lookups per call: the
+    // comparator runs ~n log n times, so at library scale that is millions of
+    // hashes for keys that are each computed once here.
+    const decorated = files.map(f => ({
+      f,
+      count: snapshotCount(snap, f.id),
+      rank: randomRank(f.id, seed),
+    }));
+    // Same tiebreak discipline as every other comparator here: equal
+    // (count, rank) falls back to id, never to directory-walk order. Don't be
+    // tempted to pack count and a 32-bit rank into one number for a numeric
+    // fast path — collisions at library scale would fall back to array order
+    // and reintroduce exactly the cursor drift randomRank exists to prevent.
+    decorated.sort((a, b) => a.count - b.count || a.rank - b.rank || compareIds(a.f, b.f));
+    files = decorated.map(d => d.f);
+  } else if (sort === 'random') {
     const ranks = new Map();
     for (const f of files) ranks.set(f.id, randomRank(f.id, seed));
     files.sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || compareIds(a, b));
@@ -160,6 +204,10 @@ function buildOrderedView(sort, seed) {
   } else if (sort === 'modified') {
     files.sort((a, b) => b.modified_utc - a.modified_utc || compareIds(a, b));
   } else {
+    // Note this also swallows any UNKNOWN sort value into alphabetical order
+    // rather than erroring, so a frontend deployed ahead of this backend would
+    // ask for 'least_shown' and quietly get an alphabetical feed. Kept
+    // permissive deliberately — the stale-frontend `page` path depends on it.
     files.sort((a, b) => a.title.localeCompare(b.title) || compareIds(a, b));
   }
 
@@ -416,6 +464,7 @@ async function updateFileCache() {
   console.log('Updating file cache from disk...');
   const start = Date.now();
   globalFileCache = groupGalleryItems(await getImageFiles(PHOTOS_DIR));
+  globalIdSet = new Set(globalFileCache.map(f => f.id));
   cacheVersion += 1;
 
   // Optimization: Write cache to disk
@@ -449,6 +498,7 @@ async function loadCacheFromDisk() {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
     globalFileCache = groupGalleryItems(JSON.parse(data));
+    globalIdSet = new Set(globalFileCache.map(f => f.id));
     console.log(`Loaded ${globalFileCache.length} files from persistent cache.`);
     // The persisted cache is a snapshot — serve from it immediately (fast boot),
     // but refresh it in the background so a restart always picks up files (and
@@ -601,23 +651,42 @@ app.get('/api/media', async (req, res) => {
     // the right spot in the new array. Files that appear mid-session now show
     // up in their proper random slot instead of being invisible until the user
     // reshuffles.
-    const cacheKey = sort === 'random'
-      ? `random_${seed}_v${cacheVersion}`
-      : `${sort}_v${cacheVersion}`;
-
-    let view = queryCache.get(cacheKey);
-    if (view) {
-      // Bump recency: delete + re-set moves this key to the end of the Map's
-      // iteration order, which the eviction below treats as "most recent".
-      queryCache.delete(cacheKey);
-      queryCache.set(cacheKey, view);
-    } else {
-      view = buildOrderedView(sort, seed);
-      // Evict only the single least-recently-used entry once at capacity.
-      if (queryCache.size >= 100) {
-        queryCache.delete(queryCache.keys().next().value);
+    let view;
+    if (sort === 'least_shown') {
+      // Deliberately NOT in queryCache. That cache is keyed by cacheVersion,
+      // but a least_shown view is not a pure function of (sort, cacheVersion):
+      // it depends on the session's frozen count baseline, and it has to
+      // SURVIVE a cacheVersion bump, which is the entire point of the
+      // snapshot. Hang the view off the snapshot that owns it instead, so the
+      // two are always freed together.
+      const snap = getSnapshot(seed);
+      view = snap.views.get(cacheVersion);
+      if (!view) {
+        view = buildOrderedView(sort, seed, snap);
+        // Only the newest index version is worth keeping; requests already in
+        // flight hold their own reference to the one being dropped.
+        snap.views.clear();
+        snap.views.set(cacheVersion, view);
       }
-      queryCache.set(cacheKey, view);
+    } else {
+      const cacheKey = sort === 'random'
+        ? `random_${seed}_v${cacheVersion}`
+        : `${sort}_v${cacheVersion}`;
+
+      view = queryCache.get(cacheKey);
+      if (view) {
+        // Bump recency: delete + re-set moves this key to the end of the Map's
+        // iteration order, which the eviction below treats as "most recent".
+        queryCache.delete(cacheKey);
+        queryCache.set(cacheKey, view);
+      } else {
+        view = buildOrderedView(sort, seed);
+        // Evict only the single least-recently-used entry once at capacity.
+        if (queryCache.size >= queryCacheLimit()) {
+          queryCache.delete(queryCache.keys().next().value);
+        }
+        queryCache.set(cacheKey, view);
+      }
     }
 
     const { files: ordered, indexById } = view;
@@ -648,7 +717,9 @@ app.get('/api/media', async (req, res) => {
 
     res.json({
       data: {
-        children: slice.map(buildClientFile),
+        // `shown` is what the client displays and what makes this feature
+        // verifiable from a plain curl. One Map lookup per item in the page.
+        children: slice.map(f => ({ ...buildClientFile(f), shown: viewCounts.get(f.id) || 0 })),
         after: endIndex < ordered.length,
         // Pass these straight back on the next request to continue the feed.
         cursor: slice.length > 0 ? slice[slice.length - 1].id : (req.query.cursor ?? null),
@@ -660,6 +731,68 @@ app.get('/api/media', async (req, res) => {
     console.error("Error in /api/media route:", error);
     res.status(500).json({ error: "Failed to retrieve media." });
   }
+});
+
+// --- View Reporting ---
+//
+// The only write route in this server. The client reports ids it has actually
+// displayed; see viewCounts.js for what happens to them.
+
+const MAX_IDS_PER_REQUEST = 500;
+// A bounded backstop, not security — this sits behind a reverse proxy, so in
+// practice every request shares one bucket. It exists so a looping client
+// can't spin the counter map and the flush timer indefinitely.
+const VIEW_RATE_WINDOW_MS = 60 * 1000;
+const VIEW_RATE_MAX = 300;
+const viewRate = new Map();
+
+function rateLimitOk(req) {
+  const ip = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+  const now = Date.now();
+  let entry = viewRate.get(ip);
+  if (!entry || now > entry.resetAt) {
+    if (viewRate.size > 1000) viewRate.clear();
+    entry = { n: 0, resetAt: now + VIEW_RATE_WINDOW_MS };
+    viewRate.set(ip, entry);
+  }
+  entry.n += 1;
+  return entry.n <= VIEW_RATE_MAX;
+}
+
+// express.json is mounted ON THIS ROUTE ONLY, never app-wide. A global parser
+// would also sit in front of app.use('/api/thumbnail') — which accepts every
+// method and carries no body — and in front of the /media static handler.
+//
+// `type` includes text/plain because the client sends this via
+// navigator.sendBeacon. A beacon with Content-Type: application/json is not a
+// CORS-simple request, so it triggers a preflight, and a preflight fired from
+// pagehide is routinely dropped by iOS Safari before it completes — silently
+// losing the batch. text/plain;charset=UTF-8 is safelisted, so no preflight.
+app.post('/api/views', express.json({ limit: '64kb', type: ['application/json', 'text/plain'] }), (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!rateLimitOk(req)) { res.status(429).end(); return; }
+
+  const ids = req.body && req.body.ids;
+  if (!Array.isArray(ids)) { res.status(400).json({ error: 'ids must be an array' }); return; }
+
+  // A pagehide beacon and a scheduled flush can race and ship the same batch
+  // twice, so dedupe within the request as well as on the client.
+  const seen = new Set();
+  let counted = 0;
+  for (const raw of ids) {
+    if (counted >= MAX_IDS_PER_REQUEST) break;
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > 512) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    // Unknown ids are dropped rather than recorded. During cold start
+    // globalIdSet is empty, so early reports are discarded — fail closed.
+    if (!globalIdSet.has(raw)) continue;
+    recordView(raw);
+    counted++;
+  }
+
+  // Never await disk here; the flush is debounced and entirely off this path.
+  res.status(204).end();
 });
 
 app.get('/api/refresh', (req, res) => {
@@ -677,6 +810,16 @@ app.get('/api/refresh-status', (req, res) => {
   res.json({ inProgress: cacheUpdateInFlight !== null, count: globalFileCache.length });
 });
 
+// Express 5 forwards body-parser failures (a malformed or oversized JSON body
+// on /api/views) to the error handler. Without one installed those come back
+// as a 500 HTML error page, which is both wrong and useless to the client.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const badRequest = err.type === 'entity.parse.failed' || err.type === 'entity.too.large';
+  if (!badRequest) console.error('Unhandled route error:', err);
+  res.status(badRequest ? 400 : 500).json({ error: badRequest ? 'Bad request' : 'Server error' });
+});
+
 async function startServer() {
   try {
     await fs.access(PHOTOS_DIR);
@@ -688,6 +831,21 @@ async function startServer() {
   // Must happen before any scan: identifies the dir by dev+inode so the scanner
   // recognises it even when reached under a different mount path.
   await registerExcludedDir(THUMBNAILS_DIR);
+
+  // Before the media cache loads, so counts are already in memory by the time
+  // the first request can be served a least_shown order.
+  setLibraryIdsProvider(() => globalIdSet);
+  await loadViewCounts(CACHE_DIR);
+
+  // Registering a signal listener SUPPRESSES Node's default exit behaviour, so
+  // the explicit process.exit is not optional: without it `docker stop` would
+  // wait out the full grace period and SIGKILL us on every single redeploy.
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      flushViewsSync();
+      process.exit(0);
+    });
+  }
 
   // Listen BEFORE the first cache load, not after. When there is no persisted
   // cache to load (every fresh container, if CACHE_DIR isn't mounted), the load

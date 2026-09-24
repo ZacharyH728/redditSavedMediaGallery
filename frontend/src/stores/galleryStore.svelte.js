@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { config } from './config.js';
 import { resetPrefetcher } from './mediaPrefetcher.js';
+import { flush as flushViewReports } from './viewReporter.js';
 
 // Every id this session has ever appended. Deliberately NOT cleared by
 // trimFront: the dedupe filter used to compare against `posts`, so as soon as
@@ -95,6 +96,13 @@ const store = $state({
 
   // ACTION: Reshuffles the gallery (new seed, reset pagination)
   reshuffle() {
+    // Land the departing session's view reports before a new seed is minted.
+    // The backend freezes a count baseline the first time it sees a seed, so
+    // anything still sitting in the client's batch would otherwise be counted
+    // against the NEW order after that baseline was taken, instead of the old
+    // one it actually belongs to.
+    flushViewReports();
+
     this.posts = [];
     this.hasMorePosts = true;
     this.error = null;
@@ -110,7 +118,10 @@ const store = $state({
     this.fetchMedia();
   },
 
-  // ACTION: Sets the sort order and reloads the gallery
+  // ACTION: Sets the sort order and reloads the gallery.
+  // Routing through reshuffle() mints a new seed, which is exactly right for
+  // 'least_shown': a new seed means a new frozen count baseline, i.e.
+  // "re-evaluate what is least shown as of now".
   setOrder(newOrder) {
     this.order = newOrder;
     this.reshuffle();
