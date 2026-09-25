@@ -69,6 +69,7 @@
     // from the user. Comparing against intent rather than using a timing guard
     // is what makes this reliable — volumechange is dispatched as a queued task,
     // so there is no synchronous window to suppress.
+    if (el.muted === lastAppliedMuted) return;
     lastAppliedMuted = el.muted;
     // The user has expressed an intent, so any fallback mute is now overridden.
     mutedByFallback = false;
@@ -193,7 +194,7 @@
       // routine while scrolling and says nothing about autoplay permission.
       // Treating it as a permission failure is what made sound cut out after a
       // while: one of these mid-scroll aborts would mute the session.
-      // (defect reintroduced for the repro)
+      if (err && err.name === 'AbortError') return;
 
       // NotAllowedError is the real autoplay refusal. Unmuted playback needs a
       // fresh gesture per element on iOS, so once the user turns sound on, each
@@ -202,7 +203,7 @@
       // preference alone, so the next item still tries with sound and a tap can
       // restore it here (see restoreAudioIfWanted).
       if (!el.muted) {
-        audioPreferences.muted = true;
+        mutedByFallback = true;
         applyMuted(el, true);
         try { await el.play(); } catch { /* genuinely can't play */ }
       }
